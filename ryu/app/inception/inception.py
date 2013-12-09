@@ -6,6 +6,8 @@ import logging
 #import array
 #import netaddr
 
+from oslo.config import cfg
+
 from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import network
@@ -22,17 +24,21 @@ from ryu.lib.packet import ethernet
 #from ryu.lib.packet import arp
 #from ryu.lib.packet import ipv4
 #from ryu.lib.packet import icmp
-
 from ryu.app.inception.inception_arp import InceptionArp
 #from app.inception.inception_dhcp import InceptionDhcp
 from ryu.app.inception import priority
 
 LOGGER = logging.getLogger(__name__)
 
+CONF = cfg.CONF
+CONF.register_opts([
+    cfg.StrOpt('ip_prefix',
+               default='192.168',
+               help="X1.X2 in your network's IP address X1.X2.X3.X4")])
 
 class Inception(app_manager.RyuApp):
     """
-    Inception cloud SDN controller
+    Inception Cloud SDN controller
     """
     _CONTEXTS = {
         'network': network.Network,
@@ -40,13 +46,10 @@ class Inception(app_manager.RyuApp):
     }
     OFP_VERSIONS = [ofproto_v1_2.OFP_VERSION]
 
-    max_len = 65535
+    MAX_LEN = 65535
 
-    def __init__(self, ip_prefix, *args, **kwargs):
-        """
-        :param ip_prefix: X1.X2 in network's IP address X1.X2.X3.X4
-        """
-        self.ip_prefix = ip_prefix
+    def __init__(self, *args, **kwargs):
+        self.ip_prefix = CONF.ip_prefix
         super(Inception, self).__init__(*args, **kwargs)
         # dpset: management of all connected switches
         self.dpset = kwargs['dpset']
@@ -141,7 +144,7 @@ class Inception(app_manager.RyuApp):
 
             # Intercepts all ARP packets and send them to the controller
             actions_arp = [ofproto_parser.OFPActionOutput(
-                    ofproto.OFPP_CONTROLLER, Inception.max_len)]
+                    ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
             instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
                     ofproto.OFPIT_APPLY_ACTIONS, actions_arp)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
@@ -346,7 +349,7 @@ class Inception(app_manager.RyuApp):
                     instructions=instructions_inport
                     ))
                 # Mofidy flows on all other datapaths contacting ethernet_src
-                actions_remote=[ofproto_parser.OFPActionOutput(
+                actions_remote = [ofproto_parser.OFPActionOutput(
                                                         remote_fwd_port)]
                 instructions_remote = [datapath.ofproto_parser.
                     OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
@@ -366,4 +369,3 @@ class Inception(app_manager.RyuApp):
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_remote
                     ))
-
