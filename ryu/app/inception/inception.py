@@ -2,9 +2,8 @@
 Inception Cloud SDN controller
 """
 
+from collections import defaultdict
 import logging
-#import array
-#import netaddr
 
 from oslo.config import cfg
 
@@ -13,7 +12,6 @@ from ryu.controller import dpset
 from ryu.controller import network
 from ryu.controller import ofp_event
 from ryu.controller import handler
-#from ryu.controller import controller
 from ryu.ofproto import ofproto_v1_2
 from ryu.ofproto import ether
 from ryu.ofproto import inet
@@ -21,14 +19,10 @@ from ryu.lib import mac
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
-#from ryu.lib.packet import arp
-#from ryu.lib.packet import ipv4
-#from ryu.lib.packet import icmp
 from ryu.app.inception.inception_arp import InceptionArp
 #from app.inception.inception_dhcp import InceptionDhcp
 from ryu.app.inception import priority
 
-from collections import defaultdict
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,28 +45,27 @@ class Inception(app_manager.RyuApp):
     MAX_LEN = 65535
 
     def __init__(self, *args, **kwargs):
-        self.ip_prefix = CONF.ip_prefix
         super(Inception, self).__init__(*args, **kwargs)
+
+        self.ip_prefix = CONF.ip_prefix
+
         # dpset: management of all connected switches
         self.dpset = kwargs['dpset']
+
         # network: port information of switches
         self.network = kwargs['network']
 
-        ## Data Structures
-        # dpid -> IP address:
-        #
+        # {dpid -> IP address}:
         # Records the "IP address" of rVM where a switch ("dpid") resides.
         self.dpid_to_ip = {}
 
-        # dpid -> [(IP address -> port)]:
-        #
+        # {dpid -> {IP address -> port}}:
         # Records the neighboring relations of each switch.
         # "IP address": address of remote VMs
         # "port": port number of dpid connecting IP address
         self.dpid_to_conns = defaultdict(dict)
 
-        # MAC => (dpid, port):
-        #
+        # {MAC => (dpid, port)}:
         # Records the switch ("dpid") to which a local "mac" connects,
         # as well as the "port" of the connection.
         self.mac_to_dpid_port = {}
@@ -104,12 +97,6 @@ class Inception(app_manager.RyuApp):
             host_ports = []
             all_ports = []
 
-            # Set the miss_send_len parameter of switch
-#            datapath.send_msg(ofproto_parser.OFPSetConfig(
-#                            datapath,
-#                            ofproto.OFPC_FRAG_NORMAL,
-#                            Inception.miss_send_len))
-
             # If the entry corresponding to the MAC already exists
             if dpid in self.dpid_to_ip:
                 LOGGER.info("switch=%s already updated", dpid_to_str(dpid))
@@ -121,7 +108,7 @@ class Inception(app_manager.RyuApp):
             # Collect port information.  Sift out ports connecting peer
             # switches and store them in dpid_to_conns
             for port in event.ports:
-                # TODO(changbl): Parse the port name to get the IP
+                # TODO(changbl): Use OVSDB. Parse the port name to get the IP
                 # address of remote rVM to which the bridge builds a
                 # VXLAN. E.g., obr1_184-53 => ip_prefix.184.53. Only
                 # store the port connecting remote rVM.
@@ -143,9 +130,9 @@ class Inception(app_manager.RyuApp):
 
             # Intercepts all ARP packets and send them to the controller
             actions_arp = [ofproto_parser.OFPActionOutput(
-                    ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
+                ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
             instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS, actions_arp)]
+                ofproto.OFPIT_APPLY_ACTIONS, actions_arp)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=ofproto_parser.OFPMatch(
@@ -153,7 +140,8 @@ class Inception(app_manager.RyuApp):
                 ),
                 priority=priority.ARP,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
                 instructions=instruction_arp
             ))
 
@@ -168,7 +156,8 @@ class Inception(app_manager.RyuApp):
                 ),
                 priority=priority.DHCP,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
                 instructions=instruction_dhcp
             ))
 
@@ -179,32 +168,34 @@ class Inception(app_manager.RyuApp):
             # future
             actions_bcast_in = [ofproto_parser.OFPActionOutput(
                 port=port_no) for port_no in host_ports]
-            instruction_bcast_in = [datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS, actions_bcast_in)]
+            instruction_bcast_in = [datapath.ofproto_parser.
+                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                    actions_bcast_in)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=ofproto_parser.OFPMatch(
                     eth_dst=mac.BROADCAST_STR,
                 ),
-
                 priority=priority.SWITCH_BCAST,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
                 instructions=instruction_bcast_in
             ))
 
             # Default flows: Process via normal L2/L3 legacy switch
             # configuration
             actions_norm = [ofproto_parser.
-                                    OFPActionOutput(ofproto.OFPP_NORMAL)]
+                OFPActionOutput(ofproto.OFPP_NORMAL)]
             instruction_norm = [datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS, actions_norm)]
+                ofproto.OFPIT_APPLY_ACTIONS, actions_norm)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=ofproto_parser.OFPMatch(),
                 priority=priority.NORMAL,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
                 instructions=instruction_norm
             ))
         # A switch disconnects
@@ -223,7 +214,7 @@ class Inception(app_manager.RyuApp):
                 if local_dpid == dpid:
                     del self.mac_to_dpid_port[mac_addr]
 
-            # Delete all rules tracking
+            # TODO(chenche): Delete all rules tracking
 
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
@@ -260,24 +251,25 @@ class Inception(app_manager.RyuApp):
             # Set unicast flow to ethernet_src
             actions_unicast = [ofproto_parser.OFPActionOutput(in_port)]
             instructions_unicast = [datapath.ofproto_parser.
-                    OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_unicast)]
+                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                      actions_unicast)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
-                    cookie=0, command=ofproto.OFPFC_ADD,
-                    priority=priority.DATA_FWD,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_unicast
-                    ))
+                datapath=datapath,
+                match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
+                priority=priority.DATA_FWD,
+                flags=ofproto.OFPFF_SEND_FLOW_REM,
+                instructions=instructions_unicast
+            ))
             self.unicast_rules.append((dpid, ethernet_src))
             # Set up broadcast flow when local hosts are sources
             # Note(changbl): where are "broadcast_ports"?
             actions_bcast_out = [ofproto_parser.OFPActionOutput(
-                                                    ofproto.OFPP_ALL)]
+                ofproto.OFPP_ALL)]
             instructions_bcast_out = [datapath.ofproto_parser.
-                    OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_bcast_out)]
+                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                      actions_bcast_out)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=ofproto_parser.OFPMatch(
@@ -286,9 +278,10 @@ class Inception(app_manager.RyuApp):
                 ),
                 priority=priority.HOST_BCAST,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
                 instructions=instructions_bcast_out
-                ))
+            ))
         else:
             (dpid_record, in_port_record) = self.mac_to_dpid_port[ethernet_src]
             if dpid_record != dpid:
@@ -298,34 +291,41 @@ class Inception(app_manager.RyuApp):
 
                 self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
                 LOGGER.info("Update: (Mac %s) => (port %s)",
-                                    ethernet_src, in_port)
+                            ethernet_src, in_port)
+
                 # Set up new broadcast flow
                 actions_bcast_out = [ofproto_parser.OFPActionOutput(
-                                                    ofproto.OFPP_ALL)]
+                    ofproto.OFPP_ALL)]
                 instructions_bcast_out = [datapath.ofproto_parser.
                     OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
                                           actions_bcast_out)]
                 datapath.send_msg(ofproto_parser.OFPFlowMod(
-                datapath=datapath,
-                match=ofproto_parser.OFPMatch(
-                    eth_src=ethernet_src,
-                    eth_dst=mac.BROADCAST_STR,
-                ),
-                priority=priority.HOST_BCAST,
-                flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0, command=ofproto.OFPFC_ADD,
-                instructions=instructions_bcast_out))
+                    datapath=datapath,
+                    match=ofproto_parser.OFPMatch(
+                        eth_src=ethernet_src,
+                        eth_dst=mac.BROADCAST_STR,
+                    ),
+                    priority=priority.HOST_BCAST,
+                    flags=ofproto.OFPFF_SEND_FLOW_REM,
+                    cookie=0,
+                    command=ofproto.OFPFC_ADD,
+                    instructions=instructions_bcast_out
+                ))
+
                 # Delete old broadcast flow
                 datapath_record.send_msg(ofproto_parser.OFPFlowMod(
                     datapath=datapath_record,
                     match=ofproto_parser.OFPMatch(
                         eth_src=ethernet_src,
                         eth_dst=mac.BROADCAST_STR,
-                        ),
+                    ),
                     priority=priority.HOST_BCAST,
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0, command=ofproto.OFPFC_DELETE_STRICT,
-                    instructions=instructions_bcast_out))
+                    cookie=0,
+                    command=ofproto.OFPFC_DELETE_STRICT,
+                    instructions=instructions_bcast_out
+                ))
+
                 # Add flow on new datapath towards ethernet_src
                 flow_command = ofproto.OFPFC_ADD
                 if (dpid, ethernet_src) in self.unicast_rules:
@@ -338,12 +338,16 @@ class Inception(app_manager.RyuApp):
                                           actions_inport)]
                 datapath.send_msg(ofproto_parser.OFPFlowMod(
                     datapath=datapath,
-                    match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
-                    cookie=0, command=flow_command,
+                    match=ofproto_parser.OFPMatch(
+                        eth_dst=ethernet_src
+                    ),
+                    cookie=0,
+                    command=flow_command,
                     priority=priority.DATA_FWD,
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_inport
-                    ))
+                ))
+
                 # Mofidy flows on all other datapaths contacting ethernet_src
                 for (remote_dpid, dst_mac) in self.unicast_rules:
                     if remote_dpid == dpid or dst_mac != ethernet_src:
@@ -351,18 +355,21 @@ class Inception(app_manager.RyuApp):
 
                     remote_datapath = self.dpset.get(remote_dpid)
                     remote_fwd_port = (self.dpid_to_conns[remote_dpid]
-                                                                [ip_datapath])
+                                       [ip_datapath])
                     actions_remote = [ofproto_parser.OFPActionOutput(
-                                                        remote_fwd_port)]
+                        remote_fwd_port)]
                     instructions_remote = [datapath.ofproto_parser.
-                            OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_remote)]
+                        OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                              actions_remote)]
 
                     remote_datapath.send_msg(ofproto_parser.OFPFlowMod(
-                    datapath=remote_datapath,
-                    match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
-                    cookie=0, command=ofproto.OFPFC_MODIFY_STRICT,
-                    priority=priority.DATA_FWD,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_remote
+                        datapath=remote_datapath,
+                        match=ofproto_parser.OFPMatch(
+                            eth_dst=ethernet_src
+                        ),
+                        cookie=0,
+                        command=ofproto.OFPFC_MODIFY_STRICT,
+                        priority=priority.DATA_FWD,
+                        flags=ofproto.OFPFF_SEND_FLOW_REM,
+                        instructions=instructions_remote
                     ))
