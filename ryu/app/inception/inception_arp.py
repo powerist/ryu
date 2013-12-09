@@ -85,9 +85,10 @@ class InceptionArp(object):
                     continue
                 ports = self.inception.dpset.get_ports(dpid)
                 # Sift out ports connecting to hosts but vxlan peers
+                vxlan_ports = [port_no for port_no in
+                            self.inception.dpid_to_conns[dpid].values()]
                 host_ports = [port.port_no for port in ports
-                              if port.port_no not in
-                              self.inception.dpid_ip_to_port.values()]
+                              if port.port_no not in vxlan_ports]
                 actions_ports = [ofproto_parser.OFPActionOutput(port)
                                                     for port in host_ports]
                 dps_datapath.send_msg(ofproto_parser.OFPPacketOut(
@@ -134,9 +135,6 @@ class InceptionArp(object):
         Process ARP reply packet
         """
         msg = event.msg
-        datapath = msg.datapath
-        ofproto_parser = datapath.ofproto_parser
-        ofproto = datapath.ofproto
 
         whole_packet = packet.Packet(msg.data)
         arp_header = whole_packet.get_protocol(arp.arp)
@@ -144,15 +142,19 @@ class InceptionArp(object):
                     arp_header.dst_ip)
         # if I know to whom to forward back this ARP reply
         if arp_header.dst_mac in self.inception.mac_to_dpid_port:
-            dpid, port = self.inception.mac_to_dpid_port[arp_header.dst_mac]
+            dst_dpid, port = (self.inception.
+                                    mac_to_dpid_port[arp_header.dst_mac])
             # setup data forwarding flows
             self._setup_data_fwd_flows(arp_header.src_mac, arp_header.dst_mac)
             # forwrad ARP reply
-            actions_out = [ofproto_parser.OFPActionOutput(port)]
-            datapath.send_msg(ofproto_parser.OFPPacketOut(
-                                datapath=datapath,
+            dst_datapath = self.inception.dpset.get(dst_dpid)
+            dst_ofproto_parser = dst_datapath.ofproto_parser
+            dst_ofproto = dst_datapath.ofproto
+            actions_out = [dst_ofproto_parser.OFPActionOutput(port)]
+            dst_datapath.send_msg(dst_ofproto_parser.OFPPacketOut(
+                                datapath=dst_datapath,
                                 buffer_id=0xffffffff,
-                                in_port=ofproto.OFPP_LOCAL,
+                                in_port=dst_ofproto.OFPP_LOCAL,
                                 data=msg.data,
                                 actions=actions_out))
             LOGGER.info("Forward ARP reply from ip=%s to ip=%s in buffer",
@@ -174,15 +176,15 @@ class InceptionArp(object):
 
         src_ip = self.inception.dpid_to_ip[src_dpid]
         dst_ip = self.inception.dpid_to_ip[dst_dpid]
-        src_fwd_port = self.inception.dpid_ip_to_port[(src_dpid, dst_ip)]
-        dst_fwd_port = self.inception.dpid_ip_to_port[(dst_dpid, src_ip)]
+        src_fwd_port = self.inception.dpid_to_conns[src_dpid][dst_ip]
+        dst_fwd_port = self.inception.dpid_to_conns[dst_dpid][src_ip]
         src_datapath = self.inception.dpset.get(src_dpid)
         dst_datapath = self.inception.dpset.get(dst_dpid)
         src_ofproto = src_datapath.ofproto
         dst_ofproto = dst_datapath.ofproto
         src_ofproto_parser = src_datapath.ofproto_parser
         dst_ofproto_parser = dst_datapath.ofproto_parser
-        if (src_dpid, dst_mac) not in self.inception.unicast_rule_tracking:
+        if (src_dpid, dst_mac) not in self.inception.unicast_rules:
             actions_fwd = [src_ofproto_parser.OFPActionOutput(src_fwd_port)]
             instructions_fwd = [src_datapath.ofproto_parser.
                                 OFPInstructionActions(
@@ -195,11 +197,11 @@ class InceptionArp(object):
                         flags=src_ofproto.OFPFF_SEND_FLOW_REM,
                         instructions=instructions_fwd
                         ))
-            self.inception.unicast_rule_tracking.append((src_dpid, dst_mac))
+            self.inception.unicast_rules.append((src_dpid, dst_mac))
             LOGGER.info("Setup forward flow on switch=%s"
                         "towards mac=%s", dpid_to_str(src_dpid), dst_mac)
 
-        if (dst_dpid, src_mac) not in self.inception.unicast_rule_tracking:
+        if (dst_dpid, src_mac) not in self.inception.unicast_rules:
             actions_dst = [dst_ofproto_parser.OFPActionOutput(dst_fwd_port)]
             instructions_dst = [dst_datapath.ofproto_parser.
                                 OFPInstructionActions(
@@ -212,6 +214,6 @@ class InceptionArp(object):
                         flags=dst_ofproto.OFPFF_SEND_FLOW_REM,
                         instructions=instructions_dst
                         ))
-            self.inception.unicast_rule_tracking.append((dst_dpid, src_mac))
+            self.inception.unicast_rules.append((dst_dpid, src_mac))
             LOGGER.info("Setup forward flow on switch=%s"
                         "towards mac=%s", dpid_to_str(dst_dpid), src_mac)

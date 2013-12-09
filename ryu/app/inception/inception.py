@@ -28,6 +28,8 @@ from ryu.app.inception.inception_arp import InceptionArp
 #from app.inception.inception_dhcp import InceptionDhcp
 from ryu.app.inception import priority
 
+from collections import defaultdict
+
 LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
@@ -55,31 +57,31 @@ class Inception(app_manager.RyuApp):
         self.dpset = kwargs['dpset']
         # network: port information of switches
         self.network = kwargs['network']
-        ## data stuctures
-        # dpid -> IP address: records the mapping from switch dpid) to
-        # IP address of the rVM where it resides. This table is to
-        # facilitate the look-up of dpid_ip_to_port
+
+        ## Data Structures
+        # dpid -> IP address:
+        #
+        # Records the "IP address" of rVM where a switch ("dpid") resides.
         self.dpid_to_ip = {}
-        # (dpid, IP address) -> port: records the neighboring
-        # relationship between switches. It is mapping from data path
-        # ID (dpid) of a switch and IP address of neighboring rVM to
-        # port number. Its semantics is that each entry stands for
-        # connection between switches via some specific port. VXLan,
-        # however, only stores information of IP address of rVM in
-        # which neighbor switches lies.  Rather than storing the
-        # mapping from dpid to dpid directly, we store mapping from
-        # dpid to IP address. With further look-up in dpid_to_ip, the
-        # dpid to dpid mapping can be retrieved.
-        self.dpid_ip_to_port = {}
-        # MAC => (dpid, port): mapping from host MAC address to (switch
-        # dpid, switch port) of end hosts
+
+        # dpid -> [(IP address -> port)]:
+        #
+        # Records the neighboring relations of each switch.
+        # "IP address": address of remote VMs
+        # "port": port number of dpid connecting IP address
+        self.dpid_to_conns = defaultdict(dict)
+
+        # MAC => (dpid, port):
+        #
+        # Records the switch ("dpid") to which a local "mac" connects,
+        # as well as the "port" of the connection.
         self.mac_to_dpid_port = {}
-        # Store port information of each switch
-        self.dpid_to_ports = {}
-        # Store pair (dpid, mac):
-        # dpid installed a rule forwarding packets to mac
-        self.unicast_rule_tracking = []
-        ## modules
+
+        # [(dpid, mac)]:
+        # "dpid" installed a rule forwarding packets to a "mac"
+        self.unicast_rules = []
+
+        ## Modules
         # ARP
         self.inception_arp = InceptionArp(self)
         # DHCP
@@ -117,7 +119,7 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Add: switch=%s -> ip=%s", dpid_to_str(dpid), ip)
 
             # Collect port information.  Sift out ports connecting peer
-            # switches and store them in dpid_ip_to_port
+            # switches and store them in dpid_to_conns
             for port in event.ports:
                 # TODO(changbl): Parse the port name to get the IP
                 # address of remote rVM to which the bridge builds a
@@ -129,7 +131,7 @@ class Inception(app_manager.RyuApp):
                     _, ip_suffix = port.name.split('_')
                     ip_suffix = ip_suffix.replace('-', '.')
                     peer_ip = '.'.join((self.ip_prefix, ip_suffix))
-                    self.dpid_ip_to_port[(dpid, peer_ip)] = port_no
+                    self.dpid_to_conns[dpid][peer_ip] = port_no
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> port=%s",
                                 dpid_to_str(dpid), peer_ip, port_no)
                 elif port.name == 'eth_dhcp':
@@ -138,9 +140,6 @@ class Inception(app_manager.RyuApp):
                 else:
                     # Store the port connecting local hosts
                     host_ports.append(port_no)
-
-            # Store the mapping from switch dpid to ports
-            self.dpid_to_ports[dpid] = all_ports
 
             # Intercepts all ARP packets and send them to the controller
             actions_arp = [ofproto_parser.OFPActionOutput(
@@ -196,7 +195,8 @@ class Inception(app_manager.RyuApp):
 
             # Default flows: Process via normal L2/L3 legacy switch
             # configuration
-            actions_norm = [ofproto_parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
+            actions_norm = [ofproto_parser.
+                                    OFPActionOutput(ofproto.OFPP_NORMAL)]
             instruction_norm = [datapath.ofproto_parser.OFPInstructionActions(
                     ofproto.OFPIT_APPLY_ACTIONS, actions_norm)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
@@ -214,20 +214,16 @@ class Inception(app_manager.RyuApp):
             # Delete switch's mapping from switch dpid to remote IP address
             del self.dpid_to_ip[dpid]
 
-            # Delete all its port information
-            del self.dpid_to_ports[dpid]
-            for key in self.dpid_ip_to_port.keys():
-                (_dpid, ip) = key
-                if _dpid == dpid:
-                    LOGGER.info("Del: (switch=%s, peer_ip=%s) -> port=%s",
-                        dpid_to_str(_dpid), ip, self.dpid_ip_to_port[key])
-                    del self.dpid_ip_to_port[key]
+            # Delete the switch's connection info
+            del self.dpid_to_conns[dpid]
 
             # Delete all connected hosts
             for mac_addr in self.mac_to_dpid_port.keys():
                 local_dpid, _ = self.mac_to_dpid_port[mac_addr]
                 if local_dpid == dpid:
                     del self.mac_to_dpid_port[mac_addr]
+
+            # Delete all rules tracking
 
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
@@ -274,7 +270,7 @@ class Inception(app_manager.RyuApp):
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_unicast
                     ))
-            self.unicast_rule_tracking.append((dpid, ethernet_src))
+            self.unicast_rules.append((dpid, ethernet_src))
             # Set up broadcast flow when local hosts are sources
             # Note(changbl): where are "broadcast_ports"?
             actions_bcast_out = [ofproto_parser.OFPActionOutput(
@@ -332,10 +328,10 @@ class Inception(app_manager.RyuApp):
                     instructions=instructions_bcast_out))
                 # Add flow on new datapath towards ethernet_src
                 flow_command = ofproto.OFPFC_ADD
-                if (dpid, ethernet_src) in self.unicast_rule_tracking:
+                if (dpid, ethernet_src) in self.unicast_rules:
                     flow_command = ofproto.OFPFC_MODIFY_STRICT
                 else:
-                    self.unicast_rule_tracking.append((dpid, ethernet_src))
+                    self.unicast_rules.append((dpid, ethernet_src))
                 actions_inport = [ofproto_parser.OFPActionOutput(in_port)]
                 instructions_inport = [datapath.ofproto_parser.
                     OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
@@ -349,18 +345,19 @@ class Inception(app_manager.RyuApp):
                     instructions=instructions_inport
                     ))
                 # Mofidy flows on all other datapaths contacting ethernet_src
-                actions_remote = [ofproto_parser.OFPActionOutput(
-                                                        remote_fwd_port)]
-                instructions_remote = [datapath.ofproto_parser.
-                    OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_remote)]
-                for (remote_dpid, dst_mac) in self.unicast_rule_tracking:
+                for (remote_dpid, dst_mac) in self.unicast_rules:
                     if remote_dpid == dpid or dst_mac != ethernet_src:
                         continue
 
                     remote_datapath = self.dpset.get(remote_dpid)
-                    remote_fwd_port = self.dpid_ip_to_port[
-                                            (remote_dpid, ip_datapath)]
+                    remote_fwd_port = (self.dpid_to_conns[remote_dpid]
+                                                                [ip_datapath])
+                    actions_remote = [ofproto_parser.OFPActionOutput(
+                                                        remote_fwd_port)]
+                    instructions_remote = [datapath.ofproto_parser.
+                            OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                          actions_remote)]
+
                     remote_datapath.send_msg(ofproto_parser.OFPFlowMod(
                     datapath=remote_datapath,
                     match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
