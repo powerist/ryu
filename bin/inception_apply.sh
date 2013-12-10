@@ -3,10 +3,8 @@
 # Usage: ./inception_apply.sh <controller_ip>
 
 controller_ip=$1
-
 bridge_name=obr1
-
-echo $controller_ip
+echo 'controller_ip: '$controller_ip
 
 # Connect the OVS to the controller
 ovs-vsctl set-controller $bridge_name tcp:$controller_ip:6633
