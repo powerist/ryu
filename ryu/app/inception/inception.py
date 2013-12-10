@@ -161,13 +161,10 @@ class Inception(app_manager.RyuApp):
                 instructions=instruction_dhcp
             ))
 
-            # Set up flow at the currently connected switch On
-            # receiving a broadcast message, the switch forwards it to
-            # all non-vxlan ports.
-            # TODO(chenche): need to setup more flows for new hosts in the
-            # future
-            actions_bcast_in = [ofproto_parser.OFPActionOutput(
-                port=port_no) for port_no in host_ports]
+            # Set up flows for broadcast messages
+            # Broadcast messages from vxlan ports: forward to local ports
+            actions_bcast_in = [ofproto_parser.OFPActionOutput(port=port_no)
+                                for port_no in host_ports]
             instruction_bcast_in = [datapath.ofproto_parser.
                 OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
                     actions_bcast_in)]
@@ -182,6 +179,25 @@ class Inception(app_manager.RyuApp):
                 command=ofproto.OFPFC_ADD,
                 instructions=instruction_bcast_in
             ))
+            # Broadcast messages from local ports: forward to vxlan ports
+            for port_no in host_ports:
+                actions_bcast_out = [ofproto_parser.OFPActionOutput(
+                    ofproto.OFPP_ALL)]
+                instructions_bcast_out = [datapath.ofproto_parser.
+                    OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                                          actions_bcast_out)]
+                datapath.send_msg(ofproto_parser.OFPFlowMod(
+                    datapath=datapath,
+                    match=ofproto_parser.OFPMatch(
+                        in_port=port_no,
+                        eth_dst=mac.BROADCAST_STR,
+                    ),
+                    priority=priority.HOST_BCAST,
+                    flags=ofproto.OFPFF_SEND_FLOW_REM,
+                    cookie=0,
+                    command=ofproto.OFPFC_ADD,
+                    instructions=instructions_bcast_out
+                ))
 
             # Default flows: Process via normal L2/L3 legacy switch
             # configuration
@@ -263,25 +279,6 @@ class Inception(app_manager.RyuApp):
                 instructions=instructions_unicast
             ))
             self.unicast_rules.append((dpid, ethernet_src))
-            # Set up broadcast flow when local hosts are sources
-            # Note(changbl): where are "broadcast_ports"?
-            actions_bcast_out = [ofproto_parser.OFPActionOutput(
-                ofproto.OFPP_ALL)]
-            instructions_bcast_out = [datapath.ofproto_parser.
-                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                      actions_bcast_out)]
-            datapath.send_msg(ofproto_parser.OFPFlowMod(
-                datapath=datapath,
-                match=ofproto_parser.OFPMatch(
-                    eth_src=ethernet_src,
-                    eth_dst=mac.BROADCAST_STR,
-                ),
-                priority=priority.HOST_BCAST,
-                flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0,
-                command=ofproto.OFPFC_ADD,
-                instructions=instructions_bcast_out
-            ))
         else:
             (dpid_record, in_port_record) = self.mac_to_dpid_port[ethernet_src]
             if dpid_record != dpid:
@@ -292,39 +289,6 @@ class Inception(app_manager.RyuApp):
                 self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
                 LOGGER.info("Update: (Mac %s) => (port %s)",
                             ethernet_src, in_port)
-
-                # Set up new broadcast flow
-                actions_bcast_out = [ofproto_parser.OFPActionOutput(
-                    ofproto.OFPP_ALL)]
-                instructions_bcast_out = [datapath.ofproto_parser.
-                    OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_bcast_out)]
-                datapath.send_msg(ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_src=ethernet_src,
-                        eth_dst=mac.BROADCAST_STR,
-                    ),
-                    priority=priority.HOST_BCAST,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instructions_bcast_out
-                ))
-
-                # Delete old broadcast flow
-                datapath_record.send_msg(ofproto_parser.OFPFlowMod(
-                    datapath=datapath_record,
-                    match=ofproto_parser.OFPMatch(
-                        eth_src=ethernet_src,
-                        eth_dst=mac.BROADCAST_STR,
-                    ),
-                    priority=priority.HOST_BCAST,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_DELETE_STRICT,
-                    instructions=instructions_bcast_out
-                ))
 
                 # Add flow on new datapath towards ethernet_src
                 flow_command = ofproto.OFPFC_ADD
