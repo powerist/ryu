@@ -37,7 +37,11 @@ CONF.register_cli_opts([
     cfg.StrOpt('log-file-mode', default='0644',
                help='default log file permission'),
     cfg.StrOpt('log-config-file', default=None,
-               help='Path to a logging config file to use')
+               help='Path to a logging config file to use'),
+    cfg.StrOpt('log_formatter',
+               default=logging.Formatter('%(asctime)s - %(name)s - '
+                                         '%(levelname)s -%(message)s'),
+               help='log formatter'),
 ])
 
 
@@ -79,7 +83,9 @@ def init_log():
         return
 
     if CONF.use_stderr:
-        log.addHandler(logging.StreamHandler(sys.stderr))
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setFormatter(CONF.log_formatter)
+        log.addHandler(console_handler)
     if _EARLY_LOG_HANDLER is not None:
         log.removeHandler(_EARLY_LOG_HANDLER)
         _EARLY_LOG_HANDLER = None
