@@ -2,6 +2,7 @@
 management.
 """
 
+# The priorities are sorted in a descending order, which is by design
 ARP = 20
 DHCP = 19
 HOST_BCAST = 18
