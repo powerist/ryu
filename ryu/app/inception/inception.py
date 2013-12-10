@@ -20,7 +20,9 @@ from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.app.inception.inception_arp import InceptionArp
-#from app.inception.inception_dhcp import InceptionDhcp
+from ryu.app.inception.inception_dhcp import InceptionDhcp
+from ryu.app.inception.inception_dhcp import DHCP_CLIENT_PORT
+from ryu.app.inception.inception_dhcp import DHCP_SERVER_PORT
 from ryu.app.inception import priority
 
 
@@ -78,7 +80,7 @@ class Inception(app_manager.RyuApp):
         # ARP
         self.inception_arp = InceptionArp(self)
         # DHCP
-        # self.inception_dhcp = InceptionDhcp(self)
+        self.inception_dhcp = InceptionDhcp(self)
 
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
@@ -145,14 +147,35 @@ class Inception(app_manager.RyuApp):
                 instructions=instruction_arp
             ))
 
-            # Intercepts DHCP packets and send them to the controller
-            instruction_dhcp = instruction_arp
+            # Intercepts all DHCP request packets and send to the controller
+            actions_dhcp = [ofproto_parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
+            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS, actions_dhcp)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
                 match=ofproto_parser.OFPMatch(
                     eth_type=ether.ETH_TYPE_IP,
                     ip_proto=inet.IPPROTO_UDP,
-                    tcp_src=68,
+                    udp_src=DHCP_CLIENT_PORT,
+                ),
+                priority=priority.DHCP,
+                flags=ofproto.OFPFF_SEND_FLOW_REM,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
+                instructions=instruction_dhcp
+            ))
+            # Intercepts all DHCP reply packets and send them to the controller
+            actions_dhcp = [ofproto_parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
+            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS, actions_dhcp)]
+            datapath.send_msg(ofproto_parser.OFPFlowMod(
+                datapath=datapath,
+                match=ofproto_parser.OFPMatch(
+                    eth_type=ether.ETH_TYPE_IP,
+                    ip_proto=inet.IPPROTO_UDP,
+                    udp_src=DHCP_SERVER_PORT,
                 ),
                 priority=priority.DHCP,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
@@ -185,7 +208,7 @@ class Inception(app_manager.RyuApp):
                     ofproto.OFPP_ALL)]
                 instructions_bcast_out = [datapath.ofproto_parser.
                     OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                                          actions_bcast_out)]
+                        actions_bcast_out)]
                 datapath.send_msg(ofproto_parser.OFPFlowMod(
                     datapath=datapath,
                     match=ofproto_parser.OFPMatch(
@@ -214,6 +237,7 @@ class Inception(app_manager.RyuApp):
                 command=ofproto.OFPFC_ADD,
                 instructions=instruction_norm
             ))
+
         # A switch disconnects
         else:
             LOGGER.info("Del: switch=%s -> ip=%s", dpid_to_str(dpid),
@@ -243,7 +267,7 @@ class Inception(app_manager.RyuApp):
         # handle ARP packet if it is
         self.inception_arp.handle(event)
         # handle DHCP packet if it is
-        # self.inception_dhcp.handle(event)
+        self.inception_dhcp.handle(event)
 
     def _do_source_learning(self, event):
         """

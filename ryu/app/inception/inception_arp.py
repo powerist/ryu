@@ -9,7 +9,6 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import arp
 from ryu.app.inception import priority
-from ryu.lib import mac
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,12 +27,12 @@ class InceptionArp(object):
     def handle(self, event):
         # process only if it is ARP packet
         msg = event.msg
-
         whole_packet = packet.Packet(msg.data)
+
         ethernet_header = whole_packet.get_protocol(ethernet.ethernet)
         if ethernet_header.ethertype != ether.ETH_TYPE_ARP:
-            LOGGER.info("This is not an ARP packet")
-            print "Its type code is ", ethernet_header.ethertype
+            LOGGER.debug("Not an ARP packet. Its type code is %s",
+                         ethernet_header.ethertype)
             return
 
         LOGGER.info("Handle ARP packet")
@@ -126,7 +125,7 @@ class InceptionArp(object):
                 data=packet_reply.data,
                 actions=actions_out
             ))
-            LOGGER.info("Answer ARP reply to host=%s (mac:%s)on port=%s"
+            LOGGER.info("Answer ARP reply to host=%s (mac:%s) on port=%s "
                         "on behalf of ip=%s (mac:%s)",
                         arp_reply.dst_ip, arp_reply.dst_mac, in_port,
                         arp_reply.src_ip, arp_reply.src_mac)
@@ -167,8 +166,8 @@ class InceptionArp(object):
         Given two MAC addresses, set up flows on their connected switches
         towards each other, so that they can forward packets between each other
         """
-        (src_dpid, src_port) = (self.inception.mac_to_dpid_port[src_mac])
-        (dst_dpid, dst_port) = (self.inception.mac_to_dpid_port[dst_mac])
+        (src_dpid, src_port) = self.inception.mac_to_dpid_port[src_mac]
+        (dst_dpid, dst_port) = self.inception.mac_to_dpid_port[dst_mac]
 
         # If src_dpid == dst_dpid, no need to set up flows
         if src_dpid == dst_dpid:

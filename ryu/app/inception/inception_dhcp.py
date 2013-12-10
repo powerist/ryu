@@ -51,7 +51,8 @@ class InceptionDhcp(object):
             return
         udp_header = whole_packet.get_protocol(udp.udp);
         if udp_header.src_port not in (DHCP_CLIENT_PORT, DHCP_SERVER_PORT):
-            LOGGER.debug('not an UDP port 67/68 packet')
+            LOGGER.debug('not an UDP port-%s/%s packet', DHCP_CLIENT_PORT,
+                         DHCP_SERVER_PORT)
             return
 
         LOGGER.info("Handle DHCP packet")
