@@ -130,6 +130,7 @@ class Inception(app_manager.RyuApp):
                     # Store the port connecting local hosts
                     host_ports.append(port_no)
 
+            # Set up one flow for ARP messages
             # Intercepts all ARP packets and send them to the controller
             actions_arp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
@@ -147,7 +148,8 @@ class Inception(app_manager.RyuApp):
                 instructions=instruction_arp
             ))
 
-            # Intercepts all DHCP request packets and send to the controller
+            # Set up two flows for DHCP messages
+            # (1) Intercept all DHCP request packets and send to the controller
             actions_dhcp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
             instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
@@ -165,7 +167,7 @@ class Inception(app_manager.RyuApp):
                 command=ofproto.OFPFC_ADD,
                 instructions=instruction_dhcp
             ))
-            # Intercepts all DHCP reply packets and send them to the controller
+            # (2) Intercept all DHCP reply packets and send to the controller
             actions_dhcp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER, Inception.MAX_LEN)]
             instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
@@ -184,25 +186,9 @@ class Inception(app_manager.RyuApp):
                 instructions=instruction_dhcp
             ))
 
-            # Set up flows for broadcast messages
-            # Broadcast messages from vxlan ports: forward to local ports
-            actions_bcast_in = [ofproto_parser.OFPActionOutput(port=port_no)
-                                for port_no in host_ports]
-            instruction_bcast_in = [datapath.ofproto_parser.
-                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_bcast_in)]
-            datapath.send_msg(ofproto_parser.OFPFlowMod(
-                datapath=datapath,
-                match=ofproto_parser.OFPMatch(
-                    eth_dst=mac.BROADCAST_STR,
-                ),
-                priority=priority.SWITCH_BCAST,
-                flags=ofproto.OFPFF_SEND_FLOW_REM,
-                cookie=0,
-                command=ofproto.OFPFC_ADD,
-                instructions=instruction_bcast_in
-            ))
-            # Broadcast messages from local ports: forward to vxlan ports
+            # Set up two parts of flows for broadcast messages
+            # (1) Broadcast messages from each local port: forward to all
+            # (other) ports
             for port_no in host_ports:
                 actions_bcast_out = [ofproto_parser.OFPActionOutput(
                     ofproto.OFPP_ALL)]
@@ -221,9 +207,29 @@ class Inception(app_manager.RyuApp):
                     command=ofproto.OFPFC_ADD,
                     instructions=instructions_bcast_out
                 ))
+            # (2) Broadcast messages from each (tunnel) port: forward to all
+            # local ports. Since priority.SWITCH_BCAST < priority.HOST_BCAST,
+            # this guarantees that only tunnel-port message will trigger this
+            # flow
+            actions_bcast_in = [ofproto_parser.OFPActionOutput(port=port_no)
+                                for port_no in host_ports]
+            instruction_bcast_in = [datapath.ofproto_parser.
+                OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
+                    actions_bcast_in)]
+            datapath.send_msg(ofproto_parser.OFPFlowMod(
+                datapath=datapath,
+                match=ofproto_parser.OFPMatch(
+                    eth_dst=mac.BROADCAST_STR,
+                ),
+                priority=priority.SWITCH_BCAST,
+                flags=ofproto.OFPFF_SEND_FLOW_REM,
+                cookie=0,
+                command=ofproto.OFPFC_ADD,
+                instructions=instruction_bcast_in
+            ))
 
-            # Default flows: Process via normal L2/L3 legacy switch
-            # configuration
+            # Finally, setup a default flow
+            # Process via normal L2/L3 legacy switch configuration
             actions_norm = [ofproto_parser.
                 OFPActionOutput(ofproto.OFPP_NORMAL)]
             instruction_norm = [datapath.ofproto_parser.OFPInstructionActions(
