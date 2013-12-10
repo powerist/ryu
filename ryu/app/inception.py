@@ -19,11 +19,11 @@ from ryu.lib import mac
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
-from ryu.app.inception.inception_arp import InceptionArp
-from ryu.app.inception.inception_dhcp import InceptionDhcp
-from ryu.app.inception.inception_dhcp import DHCP_CLIENT_PORT
-from ryu.app.inception.inception_dhcp import DHCP_SERVER_PORT
-from ryu.app.inception import priority
+from ryu.app.inception_arp import InceptionArp
+from ryu.app.inception_dhcp import InceptionDhcp
+from ryu.app.inception_dhcp import DHCP_CLIENT_PORT
+from ryu.app.inception_dhcp import DHCP_SERVER_PORT
+import ryu.app.inception_priority as priority
 
 
 LOGGER = logging.getLogger(__name__)

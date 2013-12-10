@@ -8,7 +8,7 @@ from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import arp
-from ryu.app.inception import priority
+import ryu.app.inception_priority as priority
 
 LOGGER = logging.getLogger(__name__)
 
