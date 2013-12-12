@@ -63,8 +63,8 @@ class InceptionDhcp(object):
         # A packet received from client. Find out the switch connected
         # to dhcp server and forward the packet
         if udp_header.src_port == DHCP_CLIENT_PORT:
-            LOGGER.info("Forward DHCP message to server at switch=%s "
-                        "port=%s", dpid_to_str(self.server_switch),
+            LOGGER.info("Forward DHCP message to server at (switch=%s) "
+                        "(port=%s)", dpid_to_str(self.server_switch),
                         self.server_port)
             datapath = self.inception.dpset.get(self.server_switch)
             action_out = [datapath.ofproto_parser.OFPActionOutput(
@@ -80,9 +80,9 @@ class InceptionDhcp(object):
         # the client and forward the packet to it.
         elif udp_header.src_port == DHCP_SERVER_PORT:
             dpid, port = self.inception.mac_to_dpid_port[ethernet_header.dst]
-            LOGGER.info("Forward DHCP message to client (mac=%s) at switch%s "
-                        "port=%s", ethernet_header.dst, dpid_to_str(dpid),
-                        port)
+            LOGGER.info("Forward DHCP message to client (mac=%s) at "
+                        "(switch=%s) (port=%s)", ethernet_header.dst,
+                        dpid_to_str(dpid), port)
             datapath = self.inception.dpset.get(dpid)
             action_out = [datapath.ofproto_parser.OFPActionOutput(port)]
             datapath.send_msg(datapath.ofproto_parser.OFPPacketOut(
