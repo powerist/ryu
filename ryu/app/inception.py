@@ -346,8 +346,11 @@ class Inception(app_manager.RyuApp):
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_inport
                 ))
-                LOGGER.info("Setup local forward flow on (switch=%s) towards "
-                            "(mac=%s)", dpid_to_str(dpid), ethernet_src)
+                operation = ('Setup' if flow_command == ofproto.OFPFC_ADD
+                          else 'Update')
+                LOGGER.info("%s local forward flow on (switch=%s) towards "
+                            "(mac=%s)", operation, dpid_to_str(dpid),
+                            ethernet_src)
 
                 # Mofidy flows on all other datapaths contacting ethernet_src
                 for (remote_dpid, dst_mac) in self.unicast_flows:
@@ -373,7 +376,7 @@ class Inception(app_manager.RyuApp):
                         flags=ofproto.OFPFF_SEND_FLOW_REM,
                         instructions=instructions_remote
                     ))
-                    LOGGER.info("Setup remote forward flow on (switch=%s) "
+                    LOGGER.info("Update remote forward flow on (switch=%s) "
                                 "towards (mac=%s)", dpid_to_str(remote_dpid),
                                 ethernet_src)
 
