@@ -25,7 +25,6 @@ from ryu.app.inception_dhcp import DHCP_CLIENT_PORT
 from ryu.app.inception_dhcp import DHCP_SERVER_PORT
 import ryu.app.inception_priority as priority
 
-
 LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
@@ -33,6 +32,7 @@ CONF.register_opts([
     cfg.StrOpt('ip_prefix',
                default='192.168',
                help="X1.X2 in your network's IP address X1.X2.X3.X4")])
+
 
 class Inception(app_manager.RyuApp):
     """
@@ -74,7 +74,7 @@ class Inception(app_manager.RyuApp):
 
         # [(dpid, mac)]:
         # "dpid" installed a rule forwarding packets to a "mac"
-        self.unicast_rules = []
+        self.unicast_flows = []
 
         ## Modules
         # ARP
@@ -101,11 +101,11 @@ class Inception(app_manager.RyuApp):
 
             # If the entry corresponding to the MAC already exists
             if dpid in self.dpid_to_ip:
-                LOGGER.info("switch=%s already updated", dpid_to_str(dpid))
+                LOGGER.info("(switch=%s) already updated", dpid_to_str(dpid))
                 return
 
             self.dpid_to_ip[dpid] = ip
-            LOGGER.info("Add: switch=%s -> ip=%s", dpid_to_str(dpid), ip)
+            LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid_to_str(dpid), ip)
 
             # Collect port information.  Sift out ports connecting peer
             # switches and store them in dpid_to_conns
@@ -121,7 +121,7 @@ class Inception(app_manager.RyuApp):
                     ip_suffix = ip_suffix.replace('-', '.')
                     peer_ip = '.'.join((self.ip_prefix, ip_suffix))
                     self.dpid_to_conns[dpid][peer_ip] = port_no
-                    LOGGER.info("Add: (switch=%s, peer_ip=%s) -> port=%s",
+                    LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid_to_str(dpid), peer_ip, port_no)
                 elif port.name == 'eth_dhcp':
                     self.inception_dhcp.update_server(dpid, port_no)
@@ -246,7 +246,7 @@ class Inception(app_manager.RyuApp):
 
         # A switch disconnects
         else:
-            LOGGER.info("Del: switch=%s -> ip=%s", dpid_to_str(dpid),
+            LOGGER.info("Del: (switch=%s) -> (ip=%s)", dpid_to_str(dpid),
                         self.dpid_to_ip[dpid])
             # Delete switch's mapping from switch dpid to remote IP address
             del self.dpid_to_ip[dpid]
@@ -293,7 +293,8 @@ class Inception(app_manager.RyuApp):
         ethernet_src = ethernet_header.src
         if ethernet_src not in self.mac_to_dpid_port:
             self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
-            LOGGER.info("Add: (Mac %s) => (port %s)", ethernet_src, in_port)
+            LOGGER.info("Learn: (mac=%s) => (switch=%s, port=%s)", ethernet_src,
+                        dpid_to_str(dpid), in_port)
             # Set unicast flow to ethernet_src
             actions_unicast = [ofproto_parser.OFPActionOutput(in_port)]
             instructions_unicast = [datapath.ofproto_parser.
@@ -301,31 +302,35 @@ class Inception(app_manager.RyuApp):
                                       actions_unicast)]
             datapath.send_msg(ofproto_parser.OFPFlowMod(
                 datapath=datapath,
-                match=ofproto_parser.OFPMatch(eth_dst=ethernet_src),
+                match=ofproto_parser.OFPMatch(
+                    eth_dst=ethernet_src
+                ),
                 cookie=0,
                 command=ofproto.OFPFC_ADD,
                 priority=priority.DATA_FWD,
                 flags=ofproto.OFPFF_SEND_FLOW_REM,
                 instructions=instructions_unicast
             ))
-            self.unicast_rules.append((dpid, ethernet_src))
+            self.unicast_flows.append((dpid, ethernet_src))
+            LOGGER.info("Setup local forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_to_str(dpid), ethernet_src)
         else:
             (dpid_record, in_port_record) = self.mac_to_dpid_port[ethernet_src]
+            # The host's switch changes, e.g., due a VM live migration
             if dpid_record != dpid:
-                # The server has been migrated to other switches
                 datapath_record = self.dpset.get(dpid_record)
                 ip_datapath = self.dpid_to_ip[dpid]
-
                 self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
-                LOGGER.info("Update: (Mac %s) => (port %s)",
-                            ethernet_src, in_port)
+                LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
+                            ethernet_src, dpid_to_str(dpid), in_port)
 
-                # Add flow on new datapath towards ethernet_src
-                flow_command = ofproto.OFPFC_ADD
-                if (dpid, ethernet_src) in self.unicast_rules:
+                # Add a flow on new datapath towards ethernet_src
+                flow_command = None
+                if (dpid, ethernet_src) in self.unicast_flows:
                     flow_command = ofproto.OFPFC_MODIFY_STRICT
                 else:
-                    self.unicast_rules.append((dpid, ethernet_src))
+                    flow_command = ofproto.OFPFC_ADD
+                    self.unicast_flows.append((dpid, ethernet_src))
                 actions_inport = [ofproto_parser.OFPActionOutput(in_port)]
                 instructions_inport = [datapath.ofproto_parser.
                     OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
@@ -341,9 +346,11 @@ class Inception(app_manager.RyuApp):
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_inport
                 ))
+                LOGGER.info("Setup local forward flow on (switch=%s) towards "
+                            "(mac=%s)", dpid_to_str(dpid), ethernet_src)
 
                 # Mofidy flows on all other datapaths contacting ethernet_src
-                for (remote_dpid, dst_mac) in self.unicast_rules:
+                for (remote_dpid, dst_mac) in self.unicast_flows:
                     if remote_dpid == dpid or dst_mac != ethernet_src:
                         continue
 
@@ -355,7 +362,6 @@ class Inception(app_manager.RyuApp):
                     instructions_remote = [datapath.ofproto_parser.
                         OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,
                                               actions_remote)]
-
                     remote_datapath.send_msg(ofproto_parser.OFPFlowMod(
                         datapath=remote_datapath,
                         match=ofproto_parser.OFPMatch(
@@ -367,3 +373,70 @@ class Inception(app_manager.RyuApp):
                         flags=ofproto.OFPFF_SEND_FLOW_REM,
                         instructions=instructions_remote
                     ))
+                    LOGGER.info("Setup remote forward flow on (switch=%s) "
+                                "towards (mac=%s)", dpid_to_str(remote_dpid),
+                                ethernet_src)
+
+    def setup_switch_fwd_flows(self, src_mac, dst_mac):
+        """
+        Given two MAC addresses, set up flows on their connected switches
+        towards each other, so that the two can forward packets in between
+        """
+        (src_dpid, src_port) = self.mac_to_dpid_port[src_mac]
+        (dst_dpid, dst_port) = self.mac_to_dpid_port[dst_mac]
+
+        # If src_dpid == dst_dpid, no need to set up flows
+        if src_dpid == dst_dpid:
+            return
+
+        src_ip = self.dpid_to_ip[src_dpid]
+        dst_ip = self.dpid_to_ip[dst_dpid]
+        src_fwd_port = self.dpid_to_conns[src_dpid][dst_ip]
+        dst_fwd_port = self.dpid_to_conns[dst_dpid][src_ip]
+        src_datapath = self.dpset.get(src_dpid)
+        dst_datapath = self.dpset.get(dst_dpid)
+        src_ofproto = src_datapath.ofproto
+        dst_ofproto = dst_datapath.ofproto
+        src_ofproto_parser = src_datapath.ofproto_parser
+        dst_ofproto_parser = dst_datapath.ofproto_parser
+
+        # Setup a flow on the src switch
+        if (src_dpid, dst_mac) not in self.unicast_flows:
+            actions_fwd = [src_ofproto_parser.OFPActionOutput(src_fwd_port)]
+            instructions_fwd = [src_datapath.ofproto_parser.
+                OFPInstructionActions(src_ofproto.OFPIT_APPLY_ACTIONS,
+                                      actions_fwd)]
+            src_datapath.send_msg(src_ofproto_parser.OFPFlowMod(
+                datapath=src_datapath,
+                match=src_ofproto_parser.OFPMatch(
+                    eth_dst=dst_mac
+                ),
+                cookie=0,
+                command=src_ofproto.OFPFC_ADD,
+                priority=priority.DATA_FWD,
+                flags=src_ofproto.OFPFF_SEND_FLOW_REM,
+                instructions=instructions_fwd
+            ))
+            self.unicast_flows.append((src_dpid, dst_mac))
+            LOGGER.info("Setup remote forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_to_str(src_dpid), dst_mac)
+
+        # Setup a reverse flow on the dst switch
+        if (dst_dpid, src_mac) not in self.unicast_flows:
+            actions_dst = [dst_ofproto_parser.OFPActionOutput(dst_fwd_port)]
+            instructions_dst = [dst_datapath.ofproto_parser.
+                OFPInstructionActions(dst_ofproto.OFPIT_APPLY_ACTIONS,
+                                      actions_dst)]
+            dst_datapath.send_msg(dst_ofproto_parser.OFPFlowMod(
+                datapath=dst_datapath,
+                match=dst_ofproto_parser.OFPMatch(
+                    eth_dst=src_mac
+                ),
+                cookie=0, command=dst_ofproto.OFPFC_ADD,
+                priority=priority.DATA_FWD,
+                flags=dst_ofproto.OFPFF_SEND_FLOW_REM,
+                instructions=instructions_dst
+                ))
+            self.unicast_flows.append((dst_dpid, src_mac))
+            LOGGER.info("Setup remote forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_to_str(dst_dpid), src_mac)
