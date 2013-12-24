@@ -32,6 +32,8 @@ from oslo.config import cfg
 import logging
 import sys
 
+from kazoo.client import KazooClient
+
 from ryu import log
 log.early_init_log(logging.DEBUG)
 
@@ -42,6 +44,7 @@ from ryu.base.app_manager import AppManager
 from ryu.controller import controller
 from ryu.topology import switches
 
+LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.register_cli_opts([
@@ -51,6 +54,14 @@ CONF.register_cli_opts([
                     help='application module name to run')
 ])
 
+CONF.register_opts([
+    cfg.StrOpt('zk_servers',
+               default='127.0.0.1:2181',
+               help="Addresses of ZooKeeper servers, ',' as sep"),
+    cfg.StrOpt('zk_election_path',
+               default='/election',
+               help='Path of leader election in ZooKeeper'),
+])
 
 def main():
     try:
@@ -60,6 +71,16 @@ def main():
         CONF(project='ryu', version='ryu-manager %s' % version)
 
     log.init_log()
+
+    LOGGER.info('ZooKeeper servers=%s', CONF.zk_servers)
+    zk = KazooClient(hosts=CONF.zk_servers)
+    zk.start()
+    election = zk.Election(CONF.zk_election_path)
+    LOGGER.info('Contending to be the leader...')
+    election.run(real_main)
+
+def real_main():
+    LOGGER.info('I win leader election, Ryu controller start running')
 
     app_lists = CONF.app_lists + CONF.app
     # keep old behaivor, run ofp if no application is specified.
