@@ -6,6 +6,8 @@ import logging
 from ryu.ofproto import ether
 from ryu.ofproto import inet
 from ryu.lib.dpid import dpid_to_str
+from ryu.lib.dpid import str_to_dpid
+
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
@@ -67,28 +69,39 @@ class InceptionDhcp(object):
                         "(port=%s)", dpid_to_str(self.server_switch),
                         self.server_port)
             datapath = self.inception.dpset.get(self.server_switch)
-            action_out = [datapath.ofproto_parser.OFPActionOutput(
-                self.server_port)]
-            datapath.send_msg(datapath.ofproto_parser.OFPPacketOut(
-                datapath=datapath,
-                buffer_id=0xffffffff,
-                in_port=datapath.ofproto.OFPP_LOCAL,
-                data=msg.data,
-                actions=action_out
-            ))
+            action_out = [
+                datapath.ofproto_parser.OFPActionOutput(self.server_port)
+                ]
+            datapath.send_msg(
+                datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath,
+                    buffer_id=0xffffffff,
+                    in_port=datapath.ofproto.OFPP_LOCAL,
+                    data=msg.data,
+                    actions=action_out)
+                )
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
         elif udp_header.src_port == DHCP_SERVER_PORT:
-            dpid, port = self.inception.mac_to_dpid_port[ethernet_header.dst]
+            mac_path = (self.inception.mac_to_dpid_port_zk + '/' +
+                ethernet_header.dst)
+            mac_data_raw, data_znode = self.inception.zk_client.get(mac_path)
+            mac_data = mac_data_raw.split(',')
+            dpid_str = mac_data[0]
+            dpid = str_to_dpid(dpid_str)
+            port_str = mac_data[1]
+            port = int(port_str)
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s) (port=%s)", ethernet_header.dst,
                         dpid_to_str(dpid), port)
             datapath = self.inception.dpset.get(dpid)
             action_out = [datapath.ofproto_parser.OFPActionOutput(port)]
-            datapath.send_msg(datapath.ofproto_parser.OFPPacketOut(
-                datapath=datapath,
-                buffer_id=0xffffffff,
-                in_port=datapath.ofproto.OFPP_LOCAL,
-                data=msg.data,
-                actions=action_out
-            ))
+            datapath.send_msg(
+                datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath,
+                    buffer_id=0xffffffff,
+                    in_port=datapath.ofproto.OFPP_LOCAL,
+                    data=msg.data,
+                    actions=action_out
+                    )
+                )
