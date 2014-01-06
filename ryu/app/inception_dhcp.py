@@ -14,6 +14,7 @@ from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import udp
+from ryu.app.inception_util import zk_data_to_tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class InceptionDhcp(object):
         elif udp_header.src_port == DHCP_SERVER_PORT:
             dpid_port, _ = self.inception.zk.get(os.path.join(
                 self.inception.MAC_TO_DPID_PORT, ethernet_header.dst))
-            dpid, port = dpid_port.split(',')
+            dpid, port = zk_data_to_tuple(dpid_port)
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s) (port=%s)", ethernet_header.dst,
                         dpid, port)
