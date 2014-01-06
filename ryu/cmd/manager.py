@@ -54,14 +54,8 @@ CONF.register_cli_opts([
                     help='application module name to run')
 ])
 
-CONF.register_opts([
-    cfg.StrOpt('zk_servers',
-               default='127.0.0.1:2181',
-               help="Addresses of ZooKeeper servers, ',' as sep"),
-    cfg.StrOpt('zk_election_path',
-               default='/election',
-               help='Path of leader election in ZooKeeper'),
-])
+CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
+CONF.import_opt('zk_election', 'ryu.app.inception_conf')
 
 def main():
     try:
@@ -73,9 +67,9 @@ def main():
     log.init_log()
 
     LOGGER.info('ZooKeeper servers=%s', CONF.zk_servers)
-    zk = KazooClient(hosts=CONF.zk_servers)
+    zk = KazooClient(hosts=CONF.zk_servers, logger=LOGGER)
     zk.start()
-    election = zk.Election(CONF.zk_election_path)
+    election = zk.Election(CONF.zk_election)
     LOGGER.info('Contending to be the leader...')
     election.run(real_main)
 
