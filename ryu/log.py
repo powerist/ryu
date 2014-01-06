@@ -47,6 +47,13 @@ CONF.register_cli_opts([
 
 _EARLY_LOG_HANDLER = None
 
+LOG_LEVELS = {
+    'debug': logging.DEBUG,
+    'info': logging.INFO,
+    'warning': logging.WARNING,
+    'error': logging.ERROR,
+    'critical': logging.CRITICAL,
+}
 
 def early_init_log(level=None):
     global _EARLY_LOG_HANDLER
