@@ -13,11 +13,13 @@ from ryu.ofproto import ether
 from ryu.lib.packet import arp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
+from ryu.app.inception_util import zk_data_to_tuple
 
 LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.import_opt('zk_data', 'ryu.app.inception_conf')
+
 
 class InceptionArp(object):
     """
@@ -167,7 +169,7 @@ class InceptionArp(object):
         if self.inception.zk.exists(zk_path):
             # if I know to whom to forward back this ARP reply
             dst_dpid_port, _ = self.inception.zk.get(zk_path)
-            dst_dpid, dst_port = dst_dpid_port.split(',')
+            dst_dpid, dst_port = zk_data_to_tuple(dst_dpid_port)
             dst_port = int(dst_port)
             # setup data forwarding flows
             self.inception.setup_switch_fwd_flows(arp_header.src_mac,

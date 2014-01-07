@@ -25,6 +25,8 @@ from ryu.app.inception_arp import InceptionArp
 from ryu.app.inception_dhcp import InceptionDhcp
 from ryu.app.inception_dhcp import DHCP_CLIENT_PORT
 from ryu.app.inception_dhcp import DHCP_SERVER_PORT
+from ryu.app.inception_util import tuple_to_zk_data
+from ryu.app.inception_util import zk_data_to_tuple
 import ryu.app.inception_priority as priority
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
 CONF.import_opt('zk_data', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
+
 
 class Inception(app_manager.RyuApp):
     """
@@ -93,7 +96,7 @@ class Inception(app_manager.RyuApp):
         zk_logger.addHandler(zk_console_handler)
         self.zk = KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
         self.zk.start()
-        self.zk.ensure_path(CONF.zk_data)        
+        self.zk.ensure_path(CONF.zk_data)
         self.zk.ensure_path(self.DPID_TO_IP)
         self.zk.ensure_path(self.DPID_TO_CONNS)
         self.zk.ensure_path(self.MAC_TO_DPID_PORT)
@@ -338,11 +341,11 @@ class Inception(app_manager.RyuApp):
 
         if ethernet_src not in self.zk.get_children(
                 os.path.join(self.MAC_TO_DPID_PORT)):
-            dpid_port = dpid + ',' + str(in_port)
+            dpid_port = tuple_to_zk_data((dpid, str(in_port)))
             self.zk.create(os.path.join(self.MAC_TO_DPID_PORT, ethernet_src),
                            dpid_port)
-            LOGGER.info("Learn: (mac=%s) => (switch=%s, port=%s)", ethernet_src,
-                        dpid, in_port)
+            LOGGER.info("Learn: (mac=%s) => (switch=%s, port=%s)",
+                        ethernet_src, dpid, in_port)
             # Set unicast flow to ethernet_src
             actions_unicast = [ofproto_parser.OFPActionOutput(in_port)]
             instructions_unicast = [
@@ -366,11 +369,11 @@ class Inception(app_manager.RyuApp):
         else:
             dpid_port_record, _ = self.zk.get(os.path.join(
                 self.MAC_TO_DPID_PORT, ethernet_src))
-            dpid_record, in_port_record = dpid_port_record.split(',')
+            dpid_record, _ = zk_data_to_tuple(dpid_port_record)
             # The host's switch changes, e.g., due to a VM live migration
             if dpid_record != dpid:
                 ip, _ = self.zk.get(os.path.join(self.DPID_TO_IP, dpid))
-                dpid_port_new = dpid + ',' + str(in_port)
+                dpid_port_new = tuple_to_zk_data((dpid, str(in_port)))
                 self.zk.set(os.path.join(self.MAC_TO_DPID_PORT, ethernet_src),
                             dpid_port_new)
                 LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
@@ -441,10 +444,10 @@ class Inception(app_manager.RyuApp):
         """
         src_dpid_port, _ = self.zk.get(os.path.join(
             self.MAC_TO_DPID_PORT, src_mac))
-        src_dpid, src_port = src_dpid_port.split(',')
+        src_dpid, _ = zk_data_to_tuple(src_dpid_port)
         dst_dpid_port, _ = self.zk.get(os.path.join(
             self.MAC_TO_DPID_PORT, dst_mac))
-        dst_dpid, dst_port = dst_dpid_port.split(',')
+        dst_dpid, _ = zk_data_to_tuple(dst_dpid_port)
 
         # If src_dpid == dst_dpid, no need to set up flows
         if src_dpid == dst_dpid:
