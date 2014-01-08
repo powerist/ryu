@@ -86,12 +86,13 @@ class InceptionArp(object):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                         arp_header.dst_ip)
             for dpid, dps_datapath in self.inception.dpset.dps.items():
+                dpid = dpid_to_str(dpid)
                 if dps_datapath.id == datapath.id:
                     continue
-                ports = self.inception.dpset.get_ports(dpid)
+                ports = self.inception.dpset.get_ports(str_to_dpid(dpid))
                 # Sift out ports connecting to hosts but vxlan peers
                 vxlan_ports = []
-                zk_path = os.path.join(DPID_TO_CONNS, dpid_to_str(dpid))
+                zk_path = os.path.join(DPID_TO_CONNS, dpid)
                 for child in self.inception.zk.get_children(zk_path):
                     zk_path_child = os.path.join(zk_path, child)
                     port_no, _ = self.inception.zk.get(zk_path_child)
@@ -158,7 +159,6 @@ class InceptionArp(object):
             # if I know to whom to forward back this ARP reply
             dst_dpid_port, _ = self.inception.zk.get(zk_path)
             dst_dpid, dst_port = zk_data_to_tuple(dst_dpid_port)
-            dst_port = int(dst_port)
             # setup data forwarding flows
             self.inception.setup_switch_fwd_flows(arp_header.src_mac,
                                                   arp_header.dst_mac)
@@ -166,7 +166,7 @@ class InceptionArp(object):
             dst_datapath = self.inception.dpset.get(str_to_dpid(dst_dpid))
             dst_ofproto_parser = dst_datapath.ofproto_parser
             dst_ofproto = dst_datapath.ofproto
-            actions_out = [dst_ofproto_parser.OFPActionOutput(dst_port)]
+            actions_out = [dst_ofproto_parser.OFPActionOutput(int(dst_port))]
             dst_datapath.send_msg(
                 dst_ofproto_parser.OFPPacketOut(
                     datapath=dst_datapath,

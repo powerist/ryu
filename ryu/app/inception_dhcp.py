@@ -38,7 +38,7 @@ class InceptionDhcp(object):
             LOGGER.warning("Found more than one DHCP server. Ignore others!")
             return
         self.inception.zk.set(DHCP_SWITCH_DPID, dpid)
-        self.inception.zk.set(DHCP_SWITCH_PORT, str(port))
+        self.inception.zk.set(DHCP_SWITCH_PORT, port)
 
     def handle(self, event):
         # process only if it is DHCP packet
