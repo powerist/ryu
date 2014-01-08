@@ -35,8 +35,7 @@ class InceptionDhcp(object):
         dhcp_switch_dpid, _ = self.inception.zk.get(DHCP_SWITCH_DPID)
         dhcp_switch_port, _ = self.inception.zk.get(DHCP_SWITCH_PORT)
         if dhcp_switch_port and dhcp_switch_dpid:
-            LOGGER.warning("Found more than one DHCP server. Ignore others!")
-            return
+            LOGGER.warning("DHCP-server-connected switch registered before!")
         self.inception.zk.set(DHCP_SWITCH_DPID, dpid)
         self.inception.zk.set(DHCP_SWITCH_PORT, port)
 
