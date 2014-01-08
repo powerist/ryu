@@ -3,9 +3,9 @@ management.
 """
 
 # The priorities are sorted in a descending order, which is by design
-ARP = 20
-DHCP = 19
-HOST_BCAST = 18
-SWITCH_BCAST = 17
-DATA_FWD = 15
-NORMAL = 10
+ARP = 2000
+DHCP = 1900
+HOST_BCAST = 1800
+SWITCH_BCAST = 1700
+DATA_FWD = 1500
+NORMAL = 1000
