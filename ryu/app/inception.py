@@ -3,7 +3,6 @@ Inception Cloud SDN controller
 """
 
 import logging
-import os
 
 from oslo.config import cfg
 from kazoo.client import KazooClient
