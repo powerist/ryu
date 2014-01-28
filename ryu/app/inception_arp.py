@@ -27,64 +27,62 @@ class InceptionArp(object):
     def __init__(self, inception):
         self.inception = inception
 
-    def handle(self, event):
-        # process only if it is ARP packet
-        msg = event.msg
-
-        whole_packet = packet.Packet(msg.data)
-        ethernet_header = whole_packet.get_protocol(ethernet.ethernet)
-        if ethernet_header.ethertype != ether.ETH_TYPE_ARP:
-            LOGGER.debug("Not an ARP packet. Its type code is %s",
-                         ethernet_header.ethertype)
-            return
-
+    def handle(self, dpid, in_port, arp_header, transaction):
         LOGGER.info("Handle ARP packet")
-        arp_header = whole_packet.get_protocol(arp.arp)
-        # do source learning
-        self._do_arp_learning(event)
-        # Process ARP request
-        if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(event)
-        # Process ARP reply
-        elif arp_header.opcode == arp.ARP_REPLY:
-            self._handle_arp_reply(event)
 
-    def _do_arp_learning(self, event):
+        # Do {ip => mac} learning
+        self._do_arp_learning(arp_header, transaction)
+        # Process arp request
+        if arp_header.opcode == arp.ARP_REQUEST:
+            self._handle_arp_request(dpid, in_port, arp_header, transaction)
+        # Process arp reply
+        elif arp_header.opcode == arp.ARP_REPLY:
+            self._handle_arp_reply(dpid, arp_header, transaction)
+
+    def _do_arp_learning(self, arp_header, transaction):
         """
         Learn IP => MAC mapping from a received ARP packet, update
         ip_to_mac table
         """
-        msg = event.msg
+        src_ip = arp_header.src_ip
+        src_mac = arp_header.src_mac
 
-        whole_packet = packet.Packet(msg.data)
-        arp_header = whole_packet.get_protocols(arp.arp)[0]
-        if (arp_header.src_ip not in
-                self.inception.zk.get_children(IP_TO_MAC)):
-            self.inception.zk.create(
-                os.path.join(IP_TO_MAC, arp_header.src_ip),
-                arp_header.src_mac)
-            LOGGER.info("Learn: (ip=%s) => (mac=%s)",
-                        arp_header.src_ip, arp_header.src_mac)
+        if src_ip not in self.inception.zk.get_children(IP_TO_MAC):
+            transaction.create(os.path.join(IP_TO_MAC, src_ip), src_mac)
+            LOGGER.info("Learn: (ip=%s) => (mac=%s)", src_ip, src_mac)
 
-    def _handle_arp_request(self, event):
+    def _handle_arp_request(self, dpid, in_port, arp_header, transaction):
         """
         Process ARP request packet
         """
-        msg = event.msg
-        datapath = msg.datapath
+        src_ip = arp_header.src_ip
+        src_mac = arp_header.src_mac
+        dst_ip = arp_header.dst_ip
+
+        datapath = self.inception.dpset.get(str_to_dpid(dpid))
         ofproto_parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
-        in_port = msg.match['in_port']
 
-        whole_packet = packet.Packet(msg.data)
-        arp_header = whole_packet.get_protocol(arp.arp)
-        LOGGER.info("ARP request: (ip=%s) query (ip=%s)",
-                    arp_header.src_ip, arp_header.dst_ip)
+        LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
         # If entry not found, broadcast request
         # TODO(Chen): Buffering request? Not needed in a friendly environment
-        if arp_header.dst_ip not in self.inception.zk.get_children(IP_TO_MAC):
+        if dst_ip not in self.inception.zk.get_children(IP_TO_MAC):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
-                        arp_header.dst_ip)
+                        dst_ip)
+
+            arp_request = arp.arp(opcode=arp.ARP_REQUEST,
+                                dst_mac='ff:ff:ff:ff:ff:ff',
+                                src_mac=src_mac,
+                                dst_ip=dst_ip,
+                                src_ip=src_ip)
+            eth_request = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
+                                          src=arp_header.src_mac,
+                                          dst='ff:ff:ff:ff:ff:ff')
+            packet_request = packet.Packet()
+            packet_request.add_protocol(eth_request)
+            packet_request.add_protocol(arp_request)
+            packet_request.serialize()
+
             for dpid, dps_datapath in self.inception.dpset.dps.items():
                 dpid = dpid_to_str(dpid)
                 if dps_datapath.id == datapath.id:
@@ -106,24 +104,26 @@ class InceptionArp(object):
                         datapath=dps_datapath,
                         buffer_id=0xffffffff,
                         in_port=ofproto.OFPP_LOCAL,
-                        data=msg.data,
+                        data=packet_request.data,
                         actions=actions_ports))
         # Entry exists
         else:
-            # setup data forwarding flows
+            # Setup data forwarding flows
             result_dst_mac, _ = self.inception.zk.get(
-                os.path.join(IP_TO_MAC, arp_header.dst_ip))
-            self.inception.setup_switch_fwd_flows(arp_header.src_mac,
-                                                  result_dst_mac)
+                os.path.join(IP_TO_MAC, dst_ip))
+            self.inception.setup_switch_fwd_flows(src_mac,
+                                                  dpid,
+                                                  result_dst_mac,
+                                                  transaction)
             # Construct ARP reply packet and send it to the host
             LOGGER.info("Hit: (dst_ip=%s) <=> (dst_mac=%s)",
-                        arp_header.dst_ip, result_dst_mac)
+                        dst_ip, result_dst_mac)
 
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
-                                dst_mac=arp_header.src_mac,
+                                dst_mac=src_mac,
                                 src_mac=result_dst_mac,
-                                dst_ip=arp_header.src_ip,
-                                src_ip=arp_header.dst_ip)
+                                dst_ip=src_ip,
+                                src_ip=dst_ip)
             eth_reply = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
                                           src=arp_reply.src_mac,
                                           dst=arp_reply.dst_mac)
@@ -131,7 +131,7 @@ class InceptionArp(object):
             packet_reply.add_protocol(eth_reply)
             packet_reply.add_protocol(arp_reply)
             packet_reply.serialize()
-            actions_out = [ofproto_parser.OFPActionOutput(in_port)]
+            actions_out = [ofproto_parser.OFPActionOutput(int(in_port))]
             datapath.send_msg(
                 ofproto_parser.OFPPacketOut(
                     datapath=datapath,
@@ -144,25 +144,40 @@ class InceptionArp(object):
                         arp_reply.dst_ip, arp_reply.dst_mac, in_port,
                         arp_reply.src_ip, arp_reply.src_mac)
 
-    def _handle_arp_reply(self, event):
+    def _handle_arp_reply(self, dpid, arp_header, transaction):
         """
         Process ARP reply packet
         """
-        msg = event.msg
+        src_ip = arp_header.src_ip
+        src_mac = arp_header.src_mac
+        dst_ip = arp_header.dst_ip
+        dst_mac = arp_header.dst_mac
 
-        whole_packet = packet.Packet(msg.data)
-        arp_header = whole_packet.get_protocol(arp.arp)
-        LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", arp_header.src_ip,
-                    arp_header.dst_ip)
-        zk_path = os.path.join(MAC_TO_DPID_PORT, arp_header.dst_mac)
+        LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
+        zk_path = os.path.join(MAC_TO_DPID_PORT, dst_mac)
         if self.inception.zk.exists(zk_path):
-            # if I know to whom to forward back this ARP reply
+            # If I know to whom to forward back this ARP reply
             dst_dpid_port, _ = self.inception.zk.get(zk_path)
             dst_dpid, dst_port = zk_data_to_tuple(dst_dpid_port)
-            # setup data forwarding flows
-            self.inception.setup_switch_fwd_flows(arp_header.src_mac,
-                                                  arp_header.dst_mac)
-            # forwrad ARP reply
+            # Setup data forwarding flows
+            self.inception.setup_switch_fwd_flows(src_mac,
+                                                  dpid,
+                                                  dst_mac,
+                                                  transaction)
+            # Forward ARP reply
+            arp_reply = arp.arp(opcode=arp.ARP_REPLY,
+                                dst_mac=dst_mac,
+                                src_mac=src_mac,
+                                dst_ip=dst_ip,
+                                src_ip=src_ip)
+            eth_reply = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
+                                          src=src_mac,
+                                          dst=dst_mac)
+            packet_reply = packet.Packet()
+            packet_reply.add_protocol(eth_reply)
+            packet_reply.add_protocol(arp_reply)
+            packet_reply.serialize()
+
             dst_datapath = self.inception.dpset.get(str_to_dpid(dst_dpid))
             dst_ofproto_parser = dst_datapath.ofproto_parser
             dst_ofproto = dst_datapath.ofproto
@@ -172,7 +187,7 @@ class InceptionArp(object):
                     datapath=dst_datapath,
                     buffer_id=0xffffffff,
                     in_port=dst_ofproto.OFPP_LOCAL,
-                    data=msg.data,
+                    data=packet_reply.data,
                     actions=actions_out))
             LOGGER.info("Forward ARP reply from (ip=%s) to (ip=%s) in buffer",
-                        arp_header.src_ip, arp_header.dst_ip)
+                        src_ip, dst_ip)
