@@ -23,12 +23,6 @@ import os
 from ryu.app import inception_conf as i_conf
 from ryu.app import inception_util as i_util
 from ryu.lib.dpid import str_to_dpid
-from ryu.lib.packet import ethernet
-from ryu.lib.packet import ipv4
-from ryu.lib.packet import packet
-from ryu.lib.packet import udp
-from ryu.ofproto import ether
-from ryu.ofproto import inet
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,29 +44,13 @@ class InceptionDhcp(object):
         self.inception.zk.set(i_conf.DHCP_SWITCH_DPID, dpid)
         self.inception.zk.set(i_conf.DHCP_SWITCH_PORT, port)
 
-    def handle(self, event):
-        # process only if it is DHCP packet
-        msg = event.msg
-
-        whole_packet = packet.Packet(msg.data)
-        ethernet_header = whole_packet.get_protocol(ethernet.ethernet)
-        if ethernet_header.ethertype != ether.ETH_TYPE_IP:
-            LOGGER.debug('not an Ethernet IP packet')
-            return
-        ip_header = whole_packet.get_protocol(ipv4.ipv4)
-        if ip_header.proto != inet.IPPROTO_UDP:
-            LOGGER.debug('not an IPv4 packet')
-            return
-        udp_header = whole_packet.get_protocol(udp.udp)
-        if udp_header.src_port not in (DHCP_CLIENT_PORT, DHCP_SERVER_PORT):
-            LOGGER.debug('not an UDP port-%s/%s packet', DHCP_CLIENT_PORT,
-                         DHCP_SERVER_PORT)
-            return
+    def handle(self, udp_header, ethernet_header, raw_data, transaction):
+        # Process DHCP packet
+        LOGGER.info("Handle DHCP packet")
 
         dhcp_switch_dpid, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_DPID)
         dhcp_switch_port, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_PORT)
 
-        LOGGER.info("Handle DHCP packet")
         if not dhcp_switch_dpid or not dhcp_switch_port:
             LOGGER.warning("No DHCP server has been found!")
             return
@@ -91,7 +69,7 @@ class InceptionDhcp(object):
                     datapath=datapath,
                     buffer_id=0xffffffff,
                     in_port=datapath.ofproto.OFPP_LOCAL,
-                    data=msg.data,
+                    data=raw_data,
                     actions=action_out))
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
@@ -100,8 +78,8 @@ class InceptionDhcp(object):
                 i_conf.MAC_TO_DPID_PORT, ethernet_header.dst))
             dpid, port = i_util.str_to_tuple(dpid_port)
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
-                        "(switch=%s) (port=%s)", ethernet_header.dst,
-                        dpid, port)
+                        "(switch=%s, port=%s)",
+                        ethernet_header.dst, dpid, port)
             datapath = self.inception.dpset.get(str_to_dpid(dpid))
             action_out = [datapath.ofproto_parser.OFPActionOutput(int(port))]
             datapath.send_msg(
@@ -109,5 +87,5 @@ class InceptionDhcp(object):
                     datapath=datapath,
                     buffer_id=0xffffffff,
                     in_port=datapath.ofproto.OFPP_LOCAL,
-                    data=msg.data,
+                    data=raw_data,
                     actions=action_out))

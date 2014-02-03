@@ -36,6 +36,8 @@ from ryu.lib.dpid import dpid_to_str
 from ryu.lib.dpid import str_to_dpid
 from ryu.lib import mac
 from ryu.lib.packet import arp
+from ryu.lib.packet import ipv4
+from ryu.lib.packet import udp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
 from ryu import log
@@ -67,8 +69,6 @@ class Inception(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_2.OFP_VERSION]
 
     # Default packet len
-    MAX_LEN = 65535
-
     # TODO: fix hack
     SWITCH_NUMBER = 4
 
@@ -141,7 +141,7 @@ class Inception(app_manager.RyuApp):
                     self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid, peer_ip, port_no)
-                elif port.name == 'eth_dhcp':
+                elif port.name == 'eth_dhcpp':
                     LOGGER.info("DHCP server is found!")
                     self.inception_dhcp.update_server(dpid, port_no)
                 else:
@@ -152,7 +152,7 @@ class Inception(app_manager.RyuApp):
             # Intercepts all ARP packets and send them to the controller
             actions_arp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
-                self.MAX_LEN)]
+                ofproto.OFPCML_NO_BUFFER)]
             instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions_arp)]
@@ -171,7 +171,7 @@ class Inception(app_manager.RyuApp):
             # (1) Intercept all DHCP request packets and send to the controller
             actions_dhcp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
-                self.MAX_LEN)]
+                ofproto.OFPCML_NO_BUFFER)]
             instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions_dhcp)]
@@ -190,7 +190,7 @@ class Inception(app_manager.RyuApp):
             # (2) Intercept all DHCP reply packets and send to the controller
             actions_dhcp = [ofproto_parser.OFPActionOutput(
                 ofproto.OFPP_CONTROLLER,
-                Inception.MAX_LEN)]
+                ofproto.OFPCML_NO_BUFFER)]
             instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions_dhcp)]
@@ -350,7 +350,15 @@ class Inception(app_manager.RyuApp):
             arp_header = whole_packet.get_protocol(arp.arp)
             self.inception_arp.handle(dpid, in_port, arp_header, txn)
         # handle DHCP packet if it is
-        # self.inception_dhcp.handle(event)
+        # ERROR: DHCP header unparsable in ryu.
+        if ethernet_header.ethertype == ether.ETH_TYPE_IP:
+            ip_header = whole_packet.get_protocol(ipv4.ipv4)
+            if ip_header.proto == inet.IPPROTO_UDP:
+                udp_header = whole_packet.get_protocol(udp.udp)
+                if udp_header.src_port in (i_dhcp.DHCP_CLIENT_PORT,
+                                           i_dhcp.DHCP_SERVER_PORT):
+                    self.inception_dhcp.handle(udp_header, ethernet_header,
+                                               data, txn)
 
     def _do_source_learning(self, dpid, in_port, ethernet_src, txn):
         """Learn MAC => (switch dpid, switch port) mapping from a packet,
