@@ -3,6 +3,7 @@
 *.egg-info/
 build/
 dist/
+.settings
 
 GTAGS
 GRTAGS
