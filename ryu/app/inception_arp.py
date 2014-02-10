@@ -1,60 +1,68 @@
-"""
-Inception Cloud ARP module
-"""
+# -*- coding: utf-8 -*-
+
+# vim: tabstop=4 shiftwidth=4 softtabstop=4
+
+#    Copyright (C) 2014 AT&T Labs All Rights Reserved.
+#    Copyright (C) 2014 University of Pennsylvania All Rights Reserved.
+#
+#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+#    not use this file except in compliance with the License. You may obtain
+#    a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#    License for the specific language governing permissions and limitations
+#    under the License.
 
 import logging
 import os
 
+from ryu.app import inception_conf as i_conf
+from ryu.app import inception_util as i_util
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.dpid import str_to_dpid
-from ryu.ofproto import ether
 from ryu.lib.packet import arp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
-from ryu.app.inception_util import zk_data_to_tuple
-from ryu.app.inception_conf import IP_TO_MAC
-from ryu.app.inception_conf import DPID_TO_CONNS
-from ryu.app.inception_conf import MAC_TO_DPID_PORT
+from ryu.ofproto import ether
 
 LOGGER = logging.getLogger(__name__)
 
 
 class InceptionArp(object):
-    """
-    Inception Cloud ARP module for handling ARP packets
-    """
+    """Inception Cloud ARP module for handling ARP packets."""
 
     def __init__(self, inception):
         self.inception = inception
 
-    def handle(self, dpid, in_port, arp_header, transaction):
+    def handle(self, dpid, in_port, arp_header, txn):
         LOGGER.info("Handle ARP packet")
 
         # Do {ip => mac} learning
-        self._do_arp_learning(arp_header, transaction)
+        self._do_arp_learning(arp_header, txn)
         # Process arp request
         if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(dpid, in_port, arp_header, transaction)
+            self._handle_arp_request(dpid, in_port, arp_header, txn)
         # Process arp reply
         elif arp_header.opcode == arp.ARP_REPLY:
-            self._handle_arp_reply(dpid, arp_header, transaction)
+            self._handle_arp_reply(dpid, arp_header, txn)
 
-    def _do_arp_learning(self, arp_header, transaction):
-        """
-        Learn IP => MAC mapping from a received ARP packet, update
-        ip_to_mac table
+    def _do_arp_learning(self, arp_header, txn):
+        """Learn IP => MAC mapping from a received ARP packet, update
+        ip_to_mac table.
         """
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
 
-        if src_ip not in self.inception.zk.get_children(IP_TO_MAC):
-            transaction.create(os.path.join(IP_TO_MAC, src_ip), src_mac)
+        if src_ip not in self.inception.zk.get_children(i_conf.IP_TO_MAC):
+            txn.create(os.path.join(i_conf.IP_TO_MAC, src_ip), src_mac)
             LOGGER.info("Learn: (ip=%s) => (mac=%s)", src_ip, src_mac)
 
-    def _handle_arp_request(self, dpid, in_port, arp_header, transaction):
-        """
-        Process ARP request packet
-        """
+    def _handle_arp_request(self, dpid, in_port, arp_header, txn):
+        """Process ARP request packet."""
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
         dst_ip = arp_header.dst_ip
@@ -66,18 +74,18 @@ class InceptionArp(object):
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
         # If entry not found, broadcast request
         # TODO(Chen): Buffering request? Not needed in a friendly environment
-        if dst_ip not in self.inception.zk.get_children(IP_TO_MAC):
+        if dst_ip not in self.inception.zk.get_children(i_conf.IP_TO_MAC):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                         dst_ip)
 
             arp_request = arp.arp(opcode=arp.ARP_REQUEST,
-                                dst_mac='ff:ff:ff:ff:ff:ff',
-                                src_mac=src_mac,
-                                dst_ip=dst_ip,
-                                src_ip=src_ip)
+                                  dst_mac='ff:ff:ff:ff:ff:ff',
+                                  src_mac=src_mac,
+                                  dst_ip=dst_ip,
+                                  src_ip=src_ip)
             eth_request = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
-                                          src=arp_header.src_mac,
-                                          dst='ff:ff:ff:ff:ff:ff')
+                                            src=arp_header.src_mac,
+                                            dst='ff:ff:ff:ff:ff:ff')
             packet_request = packet.Packet()
             packet_request.add_protocol(eth_request)
             packet_request.add_protocol(arp_request)
@@ -90,7 +98,7 @@ class InceptionArp(object):
                 ports = self.inception.dpset.get_ports(str_to_dpid(dpid))
                 # Sift out ports connecting to hosts but vxlan peers
                 vxlan_ports = []
-                zk_path = os.path.join(DPID_TO_CONNS, dpid)
+                zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid)
                 for child in self.inception.zk.get_children(zk_path):
                     zk_path_child = os.path.join(zk_path, child)
                     port_no, _ = self.inception.zk.get(zk_path_child)
@@ -110,11 +118,9 @@ class InceptionArp(object):
         else:
             # Setup data forwarding flows
             result_dst_mac, _ = self.inception.zk.get(
-                os.path.join(IP_TO_MAC, dst_ip))
-            self.inception.setup_switch_fwd_flows(src_mac,
-                                                  dpid,
-                                                  result_dst_mac,
-                                                  transaction)
+                os.path.join(i_conf.IP_TO_MAC, dst_ip))
+            self.inception.setup_switch_fwd_flows(src_mac, dpid,
+                                                  result_dst_mac, txn)
             # Construct ARP reply packet and send it to the host
             LOGGER.info("Hit: (dst_ip=%s) <=> (dst_mac=%s)",
                         dst_ip, result_dst_mac)
@@ -144,26 +150,21 @@ class InceptionArp(object):
                         arp_reply.dst_ip, arp_reply.dst_mac, in_port,
                         arp_reply.src_ip, arp_reply.src_mac)
 
-    def _handle_arp_reply(self, dpid, arp_header, transaction):
-        """
-        Process ARP reply packet
-        """
+    def _handle_arp_reply(self, dpid, arp_header, txn):
+        """Process ARP reply packet."""
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
         dst_ip = arp_header.dst_ip
         dst_mac = arp_header.dst_mac
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
-        zk_path = os.path.join(MAC_TO_DPID_PORT, dst_mac)
+        zk_path = os.path.join(i_conf.MAC_TO_DPID_PORT, dst_mac)
         if self.inception.zk.exists(zk_path):
             # If I know to whom to forward back this ARP reply
             dst_dpid_port, _ = self.inception.zk.get(zk_path)
-            dst_dpid, dst_port = zk_data_to_tuple(dst_dpid_port)
+            dst_dpid, dst_port = i_util.str_to_tuple(dst_dpid_port)
             # Setup data forwarding flows
-            self.inception.setup_switch_fwd_flows(src_mac,
-                                                  dpid,
-                                                  dst_mac,
-                                                  transaction)
+            self.inception.setup_switch_fwd_flows(src_mac, dpid, dst_mac, txn)
             # Forward ARP reply
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
                                 dst_mac=dst_mac,
