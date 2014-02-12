@@ -23,12 +23,12 @@
 def tuple_to_str(data_tuple, sep=','):
     """Convert tuple to string."""
 
-    zk_data = sep.join(data_tuple)
-    return zk_data
+    data_string = sep.join(data_tuple)
+    return data_string
 
 
-def str_to_tuple(zk_data, sep=','):
+def str_to_tuple(data_string, sep=','):
     """Convert string to tuple."""
 
-    data_tuple = tuple(zk_data.split(sep))
+    data_tuple = tuple(data_string.split(sep))
     return data_tuple

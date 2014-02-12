@@ -44,7 +44,7 @@ class InceptionDhcp(object):
         self.inception.zk.set(i_conf.DHCP_SWITCH_DPID, dpid)
         self.inception.zk.set(i_conf.DHCP_SWITCH_PORT, port)
 
-    def handle(self, udp_header, ethernet_header, raw_data, transaction):
+    def handle(self, udp_header, ethernet_header, raw_data, txn):
         # Process DHCP packet
         LOGGER.info("Handle DHCP packet")
 
