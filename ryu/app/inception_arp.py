@@ -72,48 +72,9 @@ class InceptionArp(object):
         ofproto = datapath.ofproto
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
-        # If entry not found, broadcast request
-        # TODO(Chen): Buffering request? Not needed in a friendly environment
+        # If entry not found, do nothing.
         if dst_ip not in self.inception.zk.get_children(i_conf.IP_TO_MAC):
-            LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
-                        dst_ip)
-
-            arp_request = arp.arp(opcode=arp.ARP_REQUEST,
-                                  dst_mac='ff:ff:ff:ff:ff:ff',
-                                  src_mac=src_mac,
-                                  dst_ip=dst_ip,
-                                  src_ip=src_ip)
-            eth_request = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
-                                            src=arp_header.src_mac,
-                                            dst='ff:ff:ff:ff:ff:ff')
-            packet_request = packet.Packet()
-            packet_request.add_protocol(eth_request)
-            packet_request.add_protocol(arp_request)
-            packet_request.serialize()
-
-            for dpid, dps_datapath in self.inception.dpset.dps.items():
-                dpid = dpid_to_str(dpid)
-                if dps_datapath.id == datapath.id:
-                    continue
-                ports = self.inception.dpset.get_ports(str_to_dpid(dpid))
-                # Sift out ports connecting to hosts but vxlan peers
-                vxlan_ports = []
-                zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid)
-                for child in self.inception.zk.get_children(zk_path):
-                    zk_path_child = os.path.join(zk_path, child)
-                    port_no, _ = self.inception.zk.get(zk_path_child)
-                    vxlan_ports.append(int(port_no))
-                host_ports = [port.port_no for port in ports
-                              if port.port_no not in vxlan_ports]
-                actions_ports = [ofproto_parser.OFPActionOutput(port)
-                                 for port in host_ports]
-                dps_datapath.send_msg(
-                    ofproto_parser.OFPPacketOut(
-                        datapath=dps_datapath,
-                        buffer_id=0xffffffff,
-                        in_port=ofproto.OFPP_LOCAL,
-                        data=packet_request.data,
-                        actions=actions_ports))
+            LOGGER.info("Entry for (ip=%s) not found.", dst_ip)
         # Entry exists
         else:
             # Setup data forwarding flows

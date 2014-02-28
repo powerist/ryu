@@ -397,14 +397,15 @@ class Inception(app_manager.RyuApp):
                         "(mac=%s)", dpid, ethernet_src)
         else:
             dpid_port_record, _ = self.zk.get(os.path.join(
-                i_conf.MAC_TO_DPID_PORT, ethernet_src))
+                                    i_conf.MAC_TO_DPID_PORT, ethernet_src))
             dpid_record, _ = i_util.str_to_tuple(dpid_port_record)
             # The host's switch changes, e.g., due to a VM live migration
             if dpid_record != dpid:
                 ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, dpid))
                 dpid_port_new = i_util.tuple_to_str((dpid, in_port))
-                txn.set(os.path.join(i_conf.MAC_TO_DPID_PORT, ethernet_src),
-                        dpid_port_new)
+                txn.set_data(os.path.join(i_conf.MAC_TO_DPID_PORT,
+                                          ethernet_src),
+                             dpid_port_new)
                 LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
                             ethernet_src, dpid, in_port)
 
