@@ -44,12 +44,17 @@ class InceptionDhcp(object):
         self.inception.zk.set(i_conf.DHCP_SWITCH_DPID, dpid)
         self.inception.zk.set(i_conf.DHCP_SWITCH_PORT, port)
 
+    def get_server_info(self):
+        # Get tuple (dpid_of_dhcpserver, port_of_dhcpserver)
+        dhcp_switch_dpid, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_DPID)
+        dhcp_switch_port, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_PORT)
+        return (dhcp_switch_dpid, dhcp_switch_port)
+
     def handle(self, udp_header, ethernet_header, raw_data, txn):
         # Process DHCP packet
         LOGGER.info("Handle DHCP packet")
 
-        dhcp_switch_dpid, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_DPID)
-        dhcp_switch_port, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_PORT)
+        dhcp_switch_dpid, dhcp_switch_port = self.get_server_info()
 
         if not dhcp_switch_dpid or not dhcp_switch_port:
             LOGGER.warning("No DHCP server has been found!")
