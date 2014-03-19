@@ -21,6 +21,7 @@ import logging
 import os
 import socket
 
+from collections import defaultdict
 from kazoo import client
 from oslo.config import cfg
 from SimpleXMLRPCServer import SimpleXMLRPCServer
@@ -83,6 +84,7 @@ class Inception(app_manager.RyuApp):
         self.dpset = kwargs['dpset']
 
         # all network data (in the form of dict) is stored in ZooKeeper
+        # TODO(chen): Add watcher to ZooKeeper for multi-active controllers
         zk_logger = logging.getLogger('kazoo')
         zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
         zk_logger.setLevel(zk_log_level)
@@ -106,6 +108,14 @@ class Inception(app_manager.RyuApp):
         self.zk.ensure_path(i_conf.IP_TO_MAC_DCENTER)
         self.zk.ensure_path(i_conf.DHCP_SWITCH_DPID)
         self.zk.ensure_path(i_conf.DHCP_SWITCH_PORT)
+
+        # local caches of network data
+        self.dpid_to_ip = {}
+        self.dpid_to_conns = defaultdict(dict)
+        self.gateway_to_conns = defaultdict(dict)
+        self.mac_to_dpid_port = {}
+        self.mac_to_flows = defaultdict(dict)
+        self.ip_to_mac_dcenter = {}
 
         self.switch_count = 0
         self.dcenter_id = CONF.datacenter_id
@@ -145,6 +155,7 @@ class Inception(app_manager.RyuApp):
 
             # Update {dpid => ip}
             zk_path_ip = os.path.join(i_conf.DPID_TO_IP, dpid)
+            self.dpid_to_ip[dpid] = ip
             self.zk.ensure_path(zk_path_ip)
             self.zk.set(zk_path_ip, ip)
             LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, ip)
@@ -166,6 +177,7 @@ class Inception(app_manager.RyuApp):
                     ip_suffix = ip_suffix.replace('-', '.')
                     peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
                     zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid, peer_ip)
+                    self.dpid_to_conns[dpid][peer_ip] = [port_no]
                     self.zk.ensure_path(zk_path)
                     self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
@@ -184,11 +196,13 @@ class Inception(app_manager.RyuApp):
                     zk_path = os.path.join(i_conf.GATEWAY_TO_CONNS,
                                            dpid,
                                            remote_ip)
+                    self.gateway_to_conns[dpid][remote_ip] = port_no
                     self.zk.ensure_path(zk_path)
                     self.zk.set(zk_path, port_no)
                     zk_path = os.path.join(i_conf.DPID_TO_CONNS,
                                            dpid,
                                            remote_ip)
+                    self.dpid_to_conns[dpid][remote_ip] = port_no
                     self.zk.ensure_path(zk_path)
                     self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
@@ -327,18 +341,25 @@ class Inception(app_manager.RyuApp):
         # A switch disconnects
         else:
             txn = self.zk.transaction()
-            ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, dpid))
 
             # Delete switch's mapping from switch dpid to remote IP address
+            del self.dpid_to_ip[dpid]
             txn.delete(os.path.join(i_conf.DPID_TO_IP, dpid))
-            LOGGER.info("Del: (switch=%s) -> (ip=%s)", dpid, ip)
+            LOGGER.info("Del: (switch=%s) -> (ip=%s)",
+                        dpid, self.dpid_to_ip[dpid])
 
             # Delete the switch's all connection info
+            del self.dpid_to_conns[dpid]
             txn.delete(os.path.join(i_conf.DPID_TO_CONNS, dpid),
                        recursive=True)
             LOGGER.info("Del: (switch=%s) dpid_to_conns", dpid)
 
             # Delete all connected hosts
+            for mac_addr in self.mac_to_dpid_port.keys():
+                local_dpid, _ = self.mac_to_dpid_port[mac_addr]
+                if local_dpid == dpid:
+                    del self.mac_to_dpid_port[mac_addr]
+
             for child in self.zk.get_children(i_conf.MAC_TO_DPID_PORT):
                 zk_path = os.path.join(i_conf.MAC_TO_DPID_PORT, child)
                 dpid_port, _ = self.zk.get(zk_path)
@@ -347,6 +368,9 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Del: (switch=%s) mac_to_dpid_port", dpid)
 
             # Delete all rules trackings
+            for mac_addr in self.mac_to_flows.keys():
+                del self.mac_to_flows[mac_addr][dpid]
+
             for child in self.zk.get_children(i_conf.MAC_TO_FLOWS):
                 if dpid in self.zk.get_children(
                         os.path.join(i_conf.MAC_TO_FLOWS, child)):
@@ -420,7 +444,8 @@ class Inception(app_manager.RyuApp):
         ofproto_parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
-        if ethernet_src not in self.zk.get_children(i_conf.MAC_TO_DPID_PORT):
+        if ethernet_src not in self.mac_to_dpid_port:
+            self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
             dpid_port = i_util.tuple_to_str((dpid, in_port))
             txn.create(os.path.join(i_conf.MAC_TO_DPID_PORT, ethernet_src),
                        dpid_port)
@@ -442,17 +467,17 @@ class Inception(app_manager.RyuApp):
                     priority=i_priority.DATA_FWD,
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_unicast))
+            self.mac_to_flows[ethernet_src][dpid] = True
             txn.create(os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src))
             txn.create(os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src, dpid))
             LOGGER.info("Setup local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid, ethernet_src)
         else:
-            dpid_port_record, _ = self.zk.get(os.path.join(
-                                    i_conf.MAC_TO_DPID_PORT, ethernet_src))
-            dpid_record, _ = i_util.str_to_tuple(dpid_port_record)
+            dpid_record, _ = self.mac_to_dpid_port[ethernet_src]
             # The host's switch changes, e.g., due to a VM live migration
             if dpid_record != dpid:
-                ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, dpid))
+                ip = self.dpid_to_ip[dpid]
+                self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
                 dpid_port_new = i_util.tuple_to_str((dpid, in_port))
                 txn.set_data(os.path.join(i_conf.MAC_TO_DPID_PORT,
                                           ethernet_src),
@@ -462,11 +487,13 @@ class Inception(app_manager.RyuApp):
 
                 # Add a flow on new datapath towards ethernet_src
                 flow_command = None
-                zk_path = os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src, dpid)
-                if self.zk.exists(zk_path):
+                if dpid in self.mac_to_flows[ethernet_src]:
                     flow_command = ofproto.OFPFC_MODIFY_STRICT
                 else:
                     flow_command = ofproto.OFPFC_ADD
+                    self.mac_to_flows[ethernet_src][dpid] = True
+                    zk_path = os.path.join(i_conf.MAC_TO_FLOWS,
+                                           ethernet_src, dpid)
                     txn.create(zk_path)
                 actions_inport = [ofproto_parser.OFPActionOutput(int(in_port))]
                 instructions_inport = [
@@ -489,14 +516,12 @@ class Inception(app_manager.RyuApp):
                             "(mac=%s)", operation, dpid, ethernet_src)
 
                 # Mofidy flows on all other datapaths contacting ethernet_src
-                for remote_dpid in self.zk.get_children(
-                        os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src)):
+                for remote_dpid in self.mac_to_flows[ethernet_src]:
                     if remote_dpid == dpid:
                         continue
 
                     remote_datapath = self.dpset.get(str_to_dpid(remote_dpid))
-                    remote_fwd_port, _ = self.zk.get(os.path.join(
-                        i_conf.DPID_TO_CONNS, remote_dpid, ip))
+                    remote_fwd_port, _ = self.dpid_to_conns[remote_dpid][ip]
                     actions_remote = [ofproto_parser.OFPActionOutput(
                         int(remote_fwd_port))]
                     instructions_remote = [
@@ -517,39 +542,28 @@ class Inception(app_manager.RyuApp):
                                 "towards (mac=%s)", remote_dpid, ethernet_src)
 
     def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn=None):
-        src_dpid_port, _ = self.zk.get(os.path.join(
-            i_conf.MAC_TO_DPID_PORT, src_mac))
-        src_dpid, _ = i_util.str_to_tuple(src_dpid_port)
-        dst_dpid_port, _ = self.zk.get(os.path.join(
-            i_conf.MAC_TO_DPID_PORT, dst_mac))
-        dst_dpid, _ = i_util.str_to_tuple(dst_dpid_port)
+        src_dpid, _ = self.mac_to_dpid_port[src_mac]
+        dst_dpid, _ = self.mac_to_dpid_port[dst_mac]
         # If src_dpid == dst_dpid, no need to set up flows
         if src_dpid == dst_dpid:
             return
 
-        src_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, src_dpid))
-        dst_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, dst_dpid))
-        src_fwd_port, _ = self.zk.get(os.path.join(
-            i_conf.DPID_TO_CONNS, src_dpid, dst_ip))
-        dst_fwd_port, _ = self.zk.get(os.path.join(
-            i_conf.DPID_TO_CONNS, dst_dpid, src_ip))
+        src_ip = self.dpid_to_ip[src_dpid]
+        dst_ip = self.dpid_to_ip[dst_dpid]
+        src_fwd_port = self.dpid_to_conns[src_dpid][dst_ip]
+        dst_fwd_port = self.dpid_to_conns[dst_dpid][src_ip]
 
         self.setup_fwd_flows(dst_mac, src_dpid, src_fwd_port,
                              src_mac, dst_dpid, dst_fwd_port, txn)
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
-        # FIXME(chen): When inception is receiving arp reply, the local
-        # MAC_TO_DPID_PORT may not be updated because of the delay
-        # of transaction. Local cache could fix it
-        local_dpid_port, _ = self.zk.get(os.path.join(
-            i_conf.MAC_TO_DPID_PORT, local_mac))
-
-        local_dpid, _ = i_util.str_to_tuple(local_dpid_port)
-        local_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, local_dpid))
+        local_dpid, _ = self.mac_to_dpid_port[local_mac]
+        local_ip, _ = self.dpid_to_ip[local_dpid]
         gateway_dpid_list = self.zk.get_children(i_conf.GATEWAY_TO_CONNS)
         # FIXME: Now there is only one gateway node allowed
         gateway_dpid = gateway_dpid_list[0]
-        gateway_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP, gateway_dpid))
+        gateway_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP,
+                                                 gateway_dpid))
         local_fwd_port, _ = self.zk.get(os.path.join(
             i_conf.DPID_TO_CONNS, local_dpid, gateway_ip))
         gateway_fwd_port, _ = self.zk.get(os.path.join(
@@ -571,8 +585,7 @@ class Inception(app_manager.RyuApp):
         dst_ofproto_parser = dst_datapath.ofproto_parser
 
         # Setup a flow on the src switch
-        if not self.zk.exists(os.path.join(i_conf.MAC_TO_FLOWS, dst_mac,
-                                           src_dpid)):
+        if src_dpid not in self.mac_to_flows[dst_mac]:
             actions_src = [src_ofproto_parser.OFPActionOutput(
                 int(src_port))]
             instructions_src = [
@@ -589,6 +602,7 @@ class Inception(app_manager.RyuApp):
                     priority=i_priority.DATA_FWD,
                     flags=src_ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_src))
+            self.mac_to_flows[dst_mac][src_dpid] = True
             if txn:
                 txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
                                         dst_mac, src_dpid))
@@ -600,8 +614,7 @@ class Inception(app_manager.RyuApp):
                         "(mac=%s)", src_dpid, dst_mac)
 
         # Setup a reverse flow on the dst switch
-        if not self.zk.exists(os.path.join(i_conf.MAC_TO_FLOWS, src_mac,
-                                           dst_dpid)):
+        if dst_dpid not in self.mac_to_flows[src_mac]:
             actions_dst = [dst_ofproto_parser.OFPActionOutput(
                 int(dst_port))]
             instructions_dst = [
@@ -618,6 +631,7 @@ class Inception(app_manager.RyuApp):
                     priority=i_priority.DATA_FWD,
                     flags=dst_ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_dst))
+            self.mac_to_flows[src_mac][dst_dpid] = True
             if txn:
                 txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
                                         src_mac, dst_dpid))
