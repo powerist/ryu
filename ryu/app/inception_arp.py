@@ -41,6 +41,9 @@ class InceptionArp(object):
         self.inception = inception
         self.dcenter = inception.dcenter_id
         self.ip_to_mac_dcenter = inception.ip_to_mac_dcenter
+        self.dpid_to_conns = inception.dpid_to_conns
+        self.mac_to_dpid_port = inception.mac_to_dpid_port
+        self.dpset = inception.dpset
         # TODO(chen): Multiple remote controllers
         self.server_proxy = ServerProxy("http://" +
                                         self.inception.remote_controller +
@@ -67,13 +70,10 @@ class InceptionArp(object):
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
 
-        if src_ip not in self.inception.ip_to_mac_dcenter:
-            self.server_proxy.do_remote_arp_learning(src_ip,
-                                                     src_mac,
-                                                     self.dcenter)
+        if src_ip not in self.ip_to_mac_dcenter:
+            self.server_proxy.rpc_arp_learning(src_ip, src_mac, self.dcenter)
+            self.ip_to_mac_dcenter[src_ip] = (src_mac, self.dcenter)
             mac_dcenter = i_util.tuple_to_str((src_mac, self.dcenter))
-            self.ip_to_mac_dcenter[arp_header.src_ip] = (arp_header.src_mac,
-                                                         self.dcenter)
             txn.create(
                 os.path.join(i_conf.IP_TO_MAC_DCENTER, src_ip), mac_dcenter)
             LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)",
@@ -98,16 +98,16 @@ class InceptionArp(object):
             packet_request.add_protocol(arp_request)
             packet_request.serialize()
 
-            for dpid, dps_datapath in self.inception.dpset.dps.items():
+            for dpid, dps_datapath in self.dpset.dps.items():
                 dpid = dpid_to_str(dpid)
                 if dps_datapath.id == dpid:
                     continue
                 ofproto_parser = dps_datapath.ofproto_parser
                 ofproto = dps_datapath.ofproto
-                ports = self.inception.dpset.get_ports(str_to_dpid(dpid))
+                ports = self.dpset.get_ports(str_to_dpid(dpid))
                 # Sift out ports connecting to hosts but vxlan peers
                 vxlan_ports = [int(port_no) for port_no in
-                    self.inception.dpid_to_conns[dpid].values()]
+                    self.dpid_to_conns[dpid].values()]
                 host_ports = [port.port_no for port in ports
                               if port.port_no not in vxlan_ports]
                 actions_ports = [ofproto_parser.OFPActionOutput(port)
@@ -130,7 +130,7 @@ class InceptionArp(object):
         src_mac = arp_header.src_mac
         dst_ip = arp_header.dst_ip
 
-        datapath = self.inception.dpset.get(str_to_dpid(dpid))
+        datapath = self.dpset.get(str_to_dpid(dpid))
         ofproto_parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
@@ -139,33 +139,32 @@ class InceptionArp(object):
         # TODO(Chen): Buffering request? Not needed in a friendly environment
         # TODO(chen): Is it possible to save this conditional?
         if dst_ip not in self.ip_to_mac_dcenter:
-            # Entry exists
             self.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
             # TODO(chen): Multiple controllers
             self.server_proxy.rpc_broadcast_arp_request(src_ip, src_mac,
                                                         dst_ip, dpid)
         else:
             # Setup data forwarding flows
-            result_dst_mac, dst_dcenter = self.ip_to_mac[arp_header.dst_ip]
+            dst_mac, dst_dcenter = self.ip_to_mac_dcenter[arp_header.dst_ip]
             if dst_dcenter == self.dcenter:
                 # Src and dst are in the same datacenter
                 self.inception.setup_intra_dcenter_flows(src_mac,
-                                                      result_dst_mac,
+                                                      dst_mac,
                                                       txn)
             else:
                 # Src and dst are in different datacenters
-                self.server_proxy.rpc_setup_inter_dcenter_flows(result_dst_mac,
+                self.server_proxy.rpc_setup_inter_dcenter_flows(dst_mac,
                                                                 src_mac)
                 self.inception.setup_inter_dcenter_flows(src_mac,
-                                                      result_dst_mac,
+                                                      dst_mac,
                                                       txn)
             # Construct ARP reply packet and send it to the host
             LOGGER.info("Hit: (dst_ip=%s) <=> (dst_mac=%s)",
-                        dst_ip, result_dst_mac)
+                        dst_ip, dst_mac)
 
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
                                 dst_mac=src_mac,
-                                src_mac=result_dst_mac,
+                                src_mac=dst_mac,
                                 dst_ip=src_ip,
                                 src_ip=dst_ip)
             eth_reply = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
@@ -189,11 +188,9 @@ class InceptionArp(object):
                         arp_reply.src_ip, arp_reply.src_mac)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac, txn=None):
-        if dst_mac in self.inception.mac_to_dpid_port:
+        if dst_mac in self.mac_to_dpid_port:
             # If I know to whom to forward back this ARP reply
-            dst_dpid, dst_port = (self.inception.mac_to_dpid_port[dst_mac])
-            # Setup data forwarding flows
-            self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
+            dst_dpid, dst_port = (self.mac_to_dpid_port[dst_mac])
             # Forward ARP reply
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
                                 dst_mac=dst_mac,
@@ -208,7 +205,7 @@ class InceptionArp(object):
             packet_reply.add_protocol(arp_reply)
             packet_reply.serialize()
 
-            dst_datapath = self.inception.dpset.get(str_to_dpid(dst_dpid))
+            dst_datapath = self.dpset.get(str_to_dpid(dst_dpid))
             dst_ofproto_parser = dst_datapath.ofproto_parser
             dst_ofproto = dst_datapath.ofproto
             actions_out = [dst_ofproto_parser.OFPActionOutput(int(dst_port))]
@@ -219,7 +216,7 @@ class InceptionArp(object):
                     in_port=dst_ofproto.OFPP_LOCAL,
                     data=packet_reply.data,
                     actions=actions_out))
-            LOGGER.info("Forward ARP reply from (ip=%s) to (ip=%s) in buffer",
+            LOGGER.info("Send ARP reply of (ip=%s) to (ip=%s): ",
                         src_ip, dst_ip)
 
     def _handle_arp_reply(self, dpid, arp_header, txn):
@@ -232,11 +229,14 @@ class InceptionArp(object):
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
         _, dst_dcenter = self.ip_to_mac_dcenter[dst_ip]
-        if dst_dcenter == self.dcenter_id:
+        if dst_dcenter == self.dcenter:
+            # Setup data forwarding flows
+            self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
             # An arp reply towards a local server
             self.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac, txn)
         else:
             # An arp reply towards a remote server in another datacenter
             self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
+            self.server_proxy.rpc_setup_inter_dcenter_flows(dst_mac, src_mac)
             self.server_proxy.rpc_send_arp_reply(src_ip, src_mac,
                                                  dst_ip, dst_mac)
