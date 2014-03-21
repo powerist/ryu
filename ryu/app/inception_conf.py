@@ -65,12 +65,9 @@ DPID_TO_CONNS = os.path.join(CONF.zk_data, 'dpid_to_conns')
 # "port": port number of dpid connecting IP address.
 # dpid include gateway switches
 
-GATEWAY_TO_CONNS = os.path.join(CONF.zk_data, 'gateway_to_conns')
-# {gateway_dpid => {remote IP address => local port}}
-# Path in ZooKeeper, under which records the neighboring relations
-# of gateway switch.
-# "IP address": address of remote VMs.
-# "port": port number of gateway dpid connecting IP address.
+GATEWAY = os.path.join(CONF.zk_data, 'gateway')
+# Znode for storing gateway dpid
+# TODO(chen): Multiple gateways
 
 MAC_TO_DPID_PORT = os.path.join(CONF.zk_data, 'mac_to_dpid_port')
 # {MAC => (local dpid, local port)}

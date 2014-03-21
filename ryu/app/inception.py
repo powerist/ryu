@@ -75,7 +75,7 @@ class Inception(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_2.OFP_VERSION]
 
     # Default packet len
-    # TODO: fix hack
+    # HACK(chen): Avoid hardcoding
     SWITCH_NUMBER = 4
     RPC_PORT = 8000
 
@@ -102,7 +102,7 @@ class Inception(app_manager.RyuApp):
         self.zk.ensure_path(i_conf.DPID_TO_IP)
         self.zk.ensure_path(i_conf.DPID_TO_CONNS)
         # TODO(chen): gateways have to be stored pairwise
-        self.zk.ensure_path(i_conf.GATEWAY_TO_CONNS)
+        self.zk.ensure_path(i_conf.GATEWAY)
         self.zk.ensure_path(i_conf.MAC_TO_DPID_PORT)
         self.zk.ensure_path(i_conf.MAC_TO_FLOWS)
         self.zk.ensure_path(i_conf.IP_TO_MAC_DCENTER)
@@ -112,10 +112,12 @@ class Inception(app_manager.RyuApp):
         # local caches of network data
         self.dpid_to_ip = {}
         self.dpid_to_conns = defaultdict(dict)
-        self.gateway_to_conns = defaultdict(dict)
         self.mac_to_dpid_port = {}
         self.mac_to_flows = defaultdict(dict)
         self.ip_to_mac_dcenter = {}
+        # TODO(chen): Find a better way to store gateway info
+        self.gateway = None
+        self.gateway_port = None
 
         self.switch_count = 0
         self.dcenter_id = CONF.datacenter_id
@@ -177,7 +179,7 @@ class Inception(app_manager.RyuApp):
                     ip_suffix = ip_suffix.replace('-', '.')
                     peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
                     zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid, peer_ip)
-                    self.dpid_to_conns[dpid][peer_ip] = [port_no]
+                    self.dpid_to_conns[dpid][peer_ip] = port_no
                     self.zk.ensure_path(zk_path)
                     self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
@@ -193,15 +195,14 @@ class Inception(app_manager.RyuApp):
                     else:
                         ip_prefix = '135.197'
                     remote_ip = '.'.join((ip_prefix, ip_suffix))
-                    zk_path = os.path.join(i_conf.GATEWAY_TO_CONNS,
-                                           dpid,
-                                           remote_ip)
-                    self.gateway_to_conns[dpid][remote_ip] = port_no
-                    self.zk.ensure_path(zk_path)
-                    self.zk.set(zk_path, port_no)
+                    zk_path = os.path.join(i_conf.GATEWAY)
+                    # TODO(chen): multiple gateways
+                    self.gateway = dpid
+                    self.zk.set(zk_path, dpid)
                     zk_path = os.path.join(i_conf.DPID_TO_CONNS,
                                            dpid,
                                            remote_ip)
+                    self.gateway_port = port_no
                     self.dpid_to_conns[dpid][remote_ip] = port_no
                     self.zk.ensure_path(zk_path)
                     self.zk.set(zk_path, port_no)
@@ -359,22 +360,19 @@ class Inception(app_manager.RyuApp):
                 local_dpid, _ = self.mac_to_dpid_port[mac_addr]
                 if local_dpid == dpid:
                     del self.mac_to_dpid_port[mac_addr]
-
-            for child in self.zk.get_children(i_conf.MAC_TO_DPID_PORT):
-                zk_path = os.path.join(i_conf.MAC_TO_DPID_PORT, child)
+                zk_path = os.path.join(i_conf.MAC_TO_DPID_PORT, mac_addr)
                 dpid_port, _ = self.zk.get(zk_path)
-                if dpid_port.startswith(dpid):
+                dpid_record, _ = i_util.str_to_tuple(dpid_port)
+                if dpid_record == dpid:
                     txn.delete(zk_path)
             LOGGER.info("Del: (switch=%s) mac_to_dpid_port", dpid)
 
             # Delete all rules trackings
             for mac_addr in self.mac_to_flows.keys():
-                del self.mac_to_flows[mac_addr][dpid]
-
-            for child in self.zk.get_children(i_conf.MAC_TO_FLOWS):
-                if dpid in self.zk.get_children(
-                        os.path.join(i_conf.MAC_TO_FLOWS, child)):
-                    txn.delete(os.path.join(i_conf.MAC_TO_FLOWS, child, dpid))
+                if dpid in self.mac_to_flows[mac_addr]:
+                    del self.mac_to_flows[mac_addr][dpid]
+                    txn.delete(os.path.join(i_conf.MAC_TO_FLOWS,
+                                            mac_addr, dpid))
             LOGGER.info("Del: (switch=%s) mac_to_flows", dpid)
             txn.commit()
 
@@ -405,6 +403,7 @@ class Inception(app_manager.RyuApp):
         # Failover logging
         znode_name = i_util.tuple_to_str((dpid, in_port))
         log_path = os.path.join(CONF.zk_failover, znode_name)
+        # FIXME: several log_path possible with multithread
         self.zk.create(log_path, msg.data)
 
         txn = self.zk.transaction()
@@ -542,6 +541,7 @@ class Inception(app_manager.RyuApp):
                                 "towards (mac=%s)", remote_dpid, ethernet_src)
 
     def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn=None):
+        LOGGER.info("Setup intra datacenter flows")
         src_dpid, _ = self.mac_to_dpid_port[src_mac]
         dst_dpid, _ = self.mac_to_dpid_port[dst_mac]
         # If src_dpid == dst_dpid, no need to set up flows
@@ -557,18 +557,46 @@ class Inception(app_manager.RyuApp):
                              src_mac, dst_dpid, dst_fwd_port, txn)
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
+        LOGGER.info("Setup inter datacenter flows")
         local_dpid, _ = self.mac_to_dpid_port[local_mac]
-        local_ip, _ = self.dpid_to_ip[local_dpid]
-        gateway_dpid_list = self.zk.get_children(i_conf.GATEWAY_TO_CONNS)
-        # FIXME: Now there is only one gateway node allowed
-        gateway_dpid = gateway_dpid_list[0]
-        gateway_ip, _ = self.zk.get(os.path.join(i_conf.DPID_TO_IP,
-                                                 gateway_dpid))
-        local_fwd_port, _ = self.zk.get(os.path.join(
-            i_conf.DPID_TO_CONNS, local_dpid, gateway_ip))
-        gateway_fwd_port, _ = self.zk.get(os.path.join(
-            i_conf.DPID_TO_CONNS, gateway_dpid, local_ip))
+        local_ip = self.dpid_to_ip[local_dpid]
+        gateway_dpid = self.gateway
+        gateway_ip = self.dpid_to_ip[gateway_dpid]
+        local_fwd_port = self.dpid_to_conns[local_dpid][gateway_ip]
+        gateway_fwd_port = self.dpid_to_conns[gateway_dpid][local_ip]
+        gateway_datapath = self.dpset.get(str_to_dpid(gateway_dpid))
+        ofproto = gateway_datapath.ofproto
+        ofproto_parser = gateway_datapath.ofproto_parser
 
+        # Setup a flow on the gateway switch towards remote_mac
+        if gateway_dpid not in self.mac_to_flows[remote_mac]:
+            actions = [ofproto_parser.OFPActionOutput(
+                int(self.gateway_port))]
+            instructions_src = [
+                gateway_datapath.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions)]
+            gateway_datapath.send_msg(
+                ofproto_parser.OFPFlowMod(
+                    datapath=gateway_datapath,
+                    match=ofproto_parser.OFPMatch(
+                        eth_dst=remote_mac),
+                    cookie=0,
+                    command=ofproto.OFPFC_ADD,
+                    priority=i_priority.DATA_FWD,
+                    flags=ofproto.OFPFF_SEND_FLOW_REM,
+                    instructions=instructions_src))
+            self.mac_to_flows[remote_mac][gateway_dpid] = True
+            if txn:
+                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
+                                        remote_mac, gateway_dpid))
+            else:
+                # TODO(chen): No failover during rpc
+                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
+                                            remote_mac, gateway_dpid),
+                               makepath=True)
+            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
+                        gateway_dpid, remote_mac)
         self.setup_fwd_flows(remote_mac, local_dpid, local_fwd_port,
                              local_mac, gateway_dpid, gateway_fwd_port, txn)
 
@@ -585,6 +613,7 @@ class Inception(app_manager.RyuApp):
         dst_ofproto_parser = dst_datapath.ofproto_parser
 
         # Setup a flow on the src switch
+        # TODO(chen): This part of code can be abstracted as a function
         if src_dpid not in self.mac_to_flows[dst_mac]:
             actions_src = [src_ofproto_parser.OFPActionOutput(
                 int(src_port))]
@@ -609,9 +638,10 @@ class Inception(app_manager.RyuApp):
             else:
                 # TODO(chen): No failover during rpc
                 self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        dst_mac, src_dpid))
-            LOGGER.info("Setup remote forward flow on (switch=%s) towards "
-                        "(mac=%s)", src_dpid, dst_mac)
+                                            dst_mac, src_dpid),
+                               makepath=True)
+            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
+                        src_dpid, dst_mac)
 
         # Setup a reverse flow on the dst switch
         if dst_dpid not in self.mac_to_flows[src_mac]:
@@ -638,6 +668,7 @@ class Inception(app_manager.RyuApp):
             else:
                 # TODO(chen): add failover during rpc
                 self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        src_mac, dst_dpid))
-            LOGGER.info("Setup remote forward flow on (switch=%s) towards "
-                        "(mac=%s)", dst_dpid, src_mac)
+                                        src_mac, dst_dpid),
+                               makepath=True)
+            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
+                        dst_dpid, src_mac)

@@ -31,24 +31,25 @@ class InceptionRpc(object):
 
     def __init__(self, inception):
         self.inception = inception
+        self.i_arp = inception.inception_arp
 
     def rpc_setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
         """Set up flows towards gateway switch"""
-        self.inception.setup_inter_dcenter_flows(local_mac, remote_mac,
+        self.inception.setup_inter_dcenter_flows(local_mac,
+                                                 remote_mac,
                                                  txn=None)
 
-    def do_remote_arp_learning(self, ip, mac, dcenter_id):
+    def rpc_arp_learning(self, ip, mac, dcenter_id):
         """Update ip_mac mapping"""
         mac_dcenter = i_util.tuple_to_str((mac, dcenter_id))
+        self.inception.ip_to_mac_dcenter[ip] = (mac, dcenter_id)
         self.inception.zk.create(
             os.path.join(i_conf.IP_TO_MAC_DCENTER, ip), mac_dcenter)
         LOGGER.info("Update remote ip_mac: (ip=%s) => (mac=%s, dcenter=%s)",
                     ip, mac, dcenter_id)
 
     def rpc_send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac, txn=None):
-        self.inception.inception_arp.send_arp_reply(src_ip, src_mac, dst_ip,
-                                                    dst_mac, txn)
+        self.i_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac, txn)
 
     def rpc_broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
-        self.inception.inception_arp.broadcast_arp_request(src_ip, src_mac,
-                                                           dst_ip, dpid)
+        self.i_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
