@@ -540,6 +540,41 @@ class Inception(app_manager.RyuApp):
                     LOGGER.info("Update remote forward flow on (switch=%s) "
                                 "towards (mac=%s)", remote_dpid, ethernet_src)
 
+    def set_unicast_flow(self, dpid, mac, port, txn=None):
+        """
+        Set up a microflow for unicast on switch dpid towards mac
+        """
+        datapath = self.dpset.get(str_to_dpid(dpid))
+        ofproto = datapath.ofproto
+        ofproto_parser = datapath.ofproto_parser
+
+        if dpid not in self.mac_to_flows[mac]:
+            actions = [ofproto_parser.OFPActionOutput(int(port))]
+            instructions_src = [
+                datapath.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions)]
+            datapath.send_msg(
+                ofproto_parser.OFPFlowMod(
+                    datapath=datapath,
+                    match=ofproto_parser.OFPMatch(
+                        eth_dst=mac),
+                    cookie=0,
+                    command=ofproto.OFPFC_ADD,
+                    priority=i_priority.DATA_FWD,
+                    flags=ofproto.OFPFF_SEND_FLOW_REM,
+                    instructions=instructions_src))
+            self.mac_to_flows[mac][dpid] = True
+            if txn:
+                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
+                                        mac, dpid))
+            else:
+                # TODO(chen): No failover during rpc
+                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid),
+                               makepath=True)
+            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
+                        dpid, mac)
+
     def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn=None):
         LOGGER.info("Setup intra datacenter flows")
         src_dpid, _ = self.mac_to_dpid_port[src_mac]
@@ -564,39 +599,8 @@ class Inception(app_manager.RyuApp):
         gateway_ip = self.dpid_to_ip[gateway_dpid]
         local_fwd_port = self.dpid_to_conns[local_dpid][gateway_ip]
         gateway_fwd_port = self.dpid_to_conns[gateway_dpid][local_ip]
-        gateway_datapath = self.dpset.get(str_to_dpid(gateway_dpid))
-        ofproto = gateway_datapath.ofproto
-        ofproto_parser = gateway_datapath.ofproto_parser
 
-        # Setup a flow on the gateway switch towards remote_mac
-        if gateway_dpid not in self.mac_to_flows[remote_mac]:
-            actions = [ofproto_parser.OFPActionOutput(
-                int(self.gateway_port))]
-            instructions_src = [
-                gateway_datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions)]
-            gateway_datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=gateway_datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_dst=remote_mac),
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    priority=i_priority.DATA_FWD,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_src))
-            self.mac_to_flows[remote_mac][gateway_dpid] = True
-            if txn:
-                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        remote_mac, gateway_dpid))
-            else:
-                # TODO(chen): No failover during rpc
-                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                            remote_mac, gateway_dpid),
-                               makepath=True)
-            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
-                        gateway_dpid, remote_mac)
+        self.set_unicast_flow(gateway_dpid, remote_mac, self.gateway_port, txn)
         self.setup_fwd_flows(remote_mac, local_dpid, local_fwd_port,
                              local_mac, gateway_dpid, gateway_fwd_port, txn)
 
@@ -605,70 +609,5 @@ class Inception(app_manager.RyuApp):
         """Given two MAC addresses, set up flows on their connected switches
         towards each other, so that the two can forward packets in between.
         """
-        src_datapath = self.dpset.get(str_to_dpid(src_dpid))
-        dst_datapath = self.dpset.get(str_to_dpid(dst_dpid))
-        src_ofproto = src_datapath.ofproto
-        dst_ofproto = dst_datapath.ofproto
-        src_ofproto_parser = src_datapath.ofproto_parser
-        dst_ofproto_parser = dst_datapath.ofproto_parser
-
-        # Setup a flow on the src switch
-        # TODO(chen): This part of code can be abstracted as a function
-        if src_dpid not in self.mac_to_flows[dst_mac]:
-            actions_src = [src_ofproto_parser.OFPActionOutput(
-                int(src_port))]
-            instructions_src = [
-                src_datapath.ofproto_parser.OFPInstructionActions(
-                    src_ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_src)]
-            src_datapath.send_msg(
-                src_ofproto_parser.OFPFlowMod(
-                    datapath=src_datapath,
-                    match=src_ofproto_parser.OFPMatch(
-                        eth_dst=dst_mac),
-                    cookie=0,
-                    command=src_ofproto.OFPFC_ADD,
-                    priority=i_priority.DATA_FWD,
-                    flags=src_ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_src))
-            self.mac_to_flows[dst_mac][src_dpid] = True
-            if txn:
-                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        dst_mac, src_dpid))
-            else:
-                # TODO(chen): No failover during rpc
-                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                            dst_mac, src_dpid),
-                               makepath=True)
-            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
-                        src_dpid, dst_mac)
-
-        # Setup a reverse flow on the dst switch
-        if dst_dpid not in self.mac_to_flows[src_mac]:
-            actions_dst = [dst_ofproto_parser.OFPActionOutput(
-                int(dst_port))]
-            instructions_dst = [
-                dst_datapath.ofproto_parser.OFPInstructionActions(
-                    dst_ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_dst)]
-            dst_datapath.send_msg(
-                dst_ofproto_parser.OFPFlowMod(
-                    datapath=dst_datapath,
-                    match=dst_ofproto_parser.OFPMatch(
-                        eth_dst=src_mac),
-                    cookie=0,
-                    command=dst_ofproto.OFPFC_ADD,
-                    priority=i_priority.DATA_FWD,
-                    flags=dst_ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_dst))
-            self.mac_to_flows[src_mac][dst_dpid] = True
-            if txn:
-                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        src_mac, dst_dpid))
-            else:
-                # TODO(chen): add failover during rpc
-                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        src_mac, dst_dpid),
-                               makepath=True)
-            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
-                        dst_dpid, src_mac)
+        self.set_unicast_flow(src_dpid, dst_mac, src_port, txn)
+        self.set_unicast_flow(dst_dpid, src_mac, dst_port, txn)
