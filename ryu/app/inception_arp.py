@@ -72,12 +72,17 @@ class InceptionArp(object):
 
         if src_ip not in self.ip_to_mac_dcenter:
             self.server_proxy.rpc_arp_learning(src_ip, src_mac, self.dcenter)
-            self.ip_to_mac_dcenter[src_ip] = (src_mac, self.dcenter)
-            mac_dcenter = i_util.tuple_to_str((src_mac, self.dcenter))
-            txn.create(
-                os.path.join(i_conf.IP_TO_MAC_DCENTER, src_ip), mac_dcenter)
-            LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)",
-                        src_ip, src_mac, self.dcenter)
+            self.update_arp_mapping(src_ip, src_mac, self.dcenter, txn)
+
+    def update_arp_mapping(self, ip, mac, dcenter, txn=None):
+        self.ip_to_mac_dcenter[ip] = (mac, dcenter)
+        mac_dcenter = i_util.tuple_to_str((mac, dcenter))
+        zk_path_ip = os.path.join(i_conf.IP_TO_MAC_DCENTER, ip)
+        if txn:
+            txn.create(zk_path_ip, mac_dcenter)
+        else:
+            self.inception.zk.create(zk_path_ip, mac_dcenter)
+        LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)", ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         """

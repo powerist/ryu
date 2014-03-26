@@ -17,14 +17,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import logging
-import os
-
-from ryu.app import inception_util as i_util
-from ryu.app import inception_conf as i_conf
-
-LOGGER = logging.getLogger(__name__)
-
 
 class InceptionRpc(object):
     """Inception Cloud rpc module for handling rpc calls"""
@@ -38,14 +30,9 @@ class InceptionRpc(object):
         self.inception.setup_inter_dcenter_flows(local_mac,
                                                  remote_mac)
 
-    def rpc_arp_learning(self, ip, mac, dcenter_id):
-        """Update ip_mac mapping"""
-        mac_dcenter = i_util.tuple_to_str((mac, dcenter_id))
-        self.inception.ip_to_mac_dcenter[ip] = (mac, dcenter_id)
-        self.inception.zk.create(
-            os.path.join(i_conf.IP_TO_MAC_DCENTER, ip), mac_dcenter)
-        LOGGER.info("Update remote ip_mac: (ip=%s) => (mac=%s, dcenter=%s)",
-                    ip, mac, dcenter_id)
+    def rpc_arp_learning(self, ip, mac, dcenter):
+        """Update remote ip_mac mapping"""
+        self.i_arp.update_arp_mapping(ip, mac, dcenter)
 
     def rpc_send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         self.i_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)

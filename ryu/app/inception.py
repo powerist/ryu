@@ -61,6 +61,7 @@ CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('datacenter_id', 'ryu.app.inception_conf')
 CONF.import_opt('remote_controller', 'ryu.app.inception_conf')
 
+
 class Inception(app_manager.RyuApp):
     """Inception Cloud SDN controller."""
 
