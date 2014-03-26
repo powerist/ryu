@@ -337,6 +337,7 @@ class Inception(app_manager.RyuApp):
 
             if self.switch_count == Inception.SWITCH_NUMBER:
                 # Do failover
+                # TODO(chen): Failover with rpc
                 self._do_failover()
 
         # A switch disconnects
@@ -540,7 +541,7 @@ class Inception(app_manager.RyuApp):
                     LOGGER.info("Update remote forward flow on (switch=%s) "
                                 "towards (mac=%s)", remote_dpid, ethernet_src)
 
-    def set_unicast_flow(self, dpid, mac, port, txn=None):
+    def set_unicast_flow(self, dpid, mac, port, txn):
         """
         Set up a microflow for unicast on switch dpid towards mac
         """
@@ -564,18 +565,14 @@ class Inception(app_manager.RyuApp):
                     priority=i_priority.DATA_FWD,
                     flags=ofproto.OFPFF_SEND_FLOW_REM,
                     instructions=instructions_src))
+            if mac not in self.mac_to_flows:
+                txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac))
             self.mac_to_flows[mac][dpid] = True
-            if txn:
-                txn.create(os.path.join(i_conf.MAC_TO_FLOWS,
-                                        mac, dpid))
-            else:
-                # TODO(chen): No failover during rpc
-                self.zk.create(os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid),
-                               makepath=True)
+            txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid))
             LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
                         dpid, mac)
 
-    def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn=None):
+    def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn):
         LOGGER.info("Setup intra datacenter flows")
         src_dpid, _ = self.mac_to_dpid_port[src_mac]
         dst_dpid, _ = self.mac_to_dpid_port[dst_mac]
@@ -592,6 +589,14 @@ class Inception(app_manager.RyuApp):
                              src_mac, dst_dpid, dst_fwd_port, txn)
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
+        # txn=None indicates rpc. Commit is needed instantly
+        # Otherwise, no need to commit now.
+        if txn:
+            commit_sig = False
+        else:
+            txn = self.zk.transaction()
+            commit_sig = True
+
         LOGGER.info("Setup inter datacenter flows")
         local_dpid, _ = self.mac_to_dpid_port[local_mac]
         local_ip = self.dpid_to_ip[local_dpid]
@@ -604,8 +609,11 @@ class Inception(app_manager.RyuApp):
         self.setup_fwd_flows(remote_mac, local_dpid, local_fwd_port,
                              local_mac, gateway_dpid, gateway_fwd_port, txn)
 
+        if commit_sig:
+            txn.commit()
+
     def setup_fwd_flows(self, dst_mac, src_dpid, src_port,
-                        src_mac, dst_dpid, dst_port, txn=None):
+                        src_mac, dst_dpid, dst_port, txn):
         """Given two MAC addresses, set up flows on their connected switches
         towards each other, so that the two can forward packets in between.
         """

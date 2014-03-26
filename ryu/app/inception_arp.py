@@ -166,7 +166,7 @@ class InceptionArp(object):
             self.send_arp_reply(src_ip_reply, src_mac_reply,
                                 dst_ip_reply, dst_mac_reply)
 
-    def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac, txn=None):
+    def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         """
         Construct an arp reply given the specific arguments
         and send it through switch connecting dst_mac
@@ -217,7 +217,7 @@ class InceptionArp(object):
             # Setup data forwarding flows
             self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
             # An arp reply towards a local server
-            self.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac, txn)
+            self.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)
         else:
             # An arp reply towards a remote server in another datacenter
             self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)

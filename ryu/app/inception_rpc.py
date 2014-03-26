@@ -33,11 +33,10 @@ class InceptionRpc(object):
         self.inception = inception
         self.i_arp = inception.inception_arp
 
-    def rpc_setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
+    def rpc_setup_inter_dcenter_flows(self, local_mac, remote_mac):
         """Set up flows towards gateway switch"""
         self.inception.setup_inter_dcenter_flows(local_mac,
-                                                 remote_mac,
-                                                 txn=None)
+                                                 remote_mac)
 
     def rpc_arp_learning(self, ip, mac, dcenter_id):
         """Update ip_mac mapping"""
@@ -48,8 +47,8 @@ class InceptionRpc(object):
         LOGGER.info("Update remote ip_mac: (ip=%s) => (mac=%s, dcenter=%s)",
                     ip, mac, dcenter_id)
 
-    def rpc_send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac, txn=None):
-        self.i_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac, txn)
+    def rpc_send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
+        self.i_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)
 
     def rpc_broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         self.i_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
