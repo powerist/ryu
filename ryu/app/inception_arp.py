@@ -20,8 +20,6 @@
 import logging
 import os
 
-from xmlrpclib import ServerProxy
-
 from ryu.app import inception_conf as i_conf
 from ryu.app import inception_util as i_util
 from ryu.lib.dpid import dpid_to_str
@@ -40,15 +38,10 @@ class InceptionArp(object):
     def __init__(self, inception):
         self.inception = inception
         self.dcenter = inception.dcenter_id
-        self.ip_to_mac_dcenter = inception.ip_to_mac_dcenter
+        self.ip_to_mac = inception.ip_to_mac
         self.dpid_to_conns = inception.dpid_to_conns
-        self.mac_to_dpid_port = inception.mac_to_dpid_port
+        self.mac_to_position = inception.mac_to_position
         self.dpset = inception.dpset
-        # TODO(chen): Multiple remote controllers
-        self.server_proxy = ServerProxy("http://" +
-                                        self.inception.remote_controller +
-                                        ":" +
-                                        str(self.inception.RPC_PORT))
 
     def handle(self, dpid, in_port, arp_header, txn):
         LOGGER.info("Handle ARP packet")
@@ -70,18 +63,22 @@ class InceptionArp(object):
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
 
-        if src_ip not in self.ip_to_mac_dcenter:
-            self.server_proxy.rpc_arp_learning(src_ip, src_mac, self.dcenter)
+        if src_ip not in self.ip_to_mac:
+            self.inception.server_proxy.rpc_arp_learning(src_ip, src_mac,
+                                                         self.dcenter)
             self.update_arp_mapping(src_ip, src_mac, self.dcenter, txn)
 
-    def update_arp_mapping(self, ip, mac, dcenter, txn=None):
-        self.ip_to_mac_dcenter[ip] = (mac, dcenter)
-        mac_dcenter = i_util.tuple_to_str((mac, dcenter))
-        zk_path_ip = os.path.join(i_conf.IP_TO_MAC_DCENTER, ip)
-        if txn:
-            txn.create(zk_path_ip, mac_dcenter)
+    def update_arp_mapping(self, ip, mac, dcenter, txn):
+        if ip in self.ip_to_mac:
+            is_update = True
         else:
-            self.inception.zk.create(zk_path_ip, mac_dcenter)
+            is_update = False
+        self.ip_to_mac[ip] = mac
+        zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
+        if is_update:
+            txn.set_data(zk_path_ip, mac)
+        else:
+            txn.set_data(zk_path_ip, mac)
         LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)", ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
@@ -91,7 +88,7 @@ class InceptionArp(object):
 
         @param datapath: datapath issuing arp request
         """
-        if dst_ip not in self.ip_to_mac_dcenter:
+        if dst_ip not in self.ip_to_mac:
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                             dst_ip)
 
@@ -143,24 +140,26 @@ class InceptionArp(object):
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
         # If entry not found, broadcast request
-        if dst_ip not in self.ip_to_mac_dcenter:
+        if dst_ip not in self.ip_to_mac:
             self.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
             # TODO(chen): Multiple controllers
-            self.server_proxy.rpc_broadcast_arp_request(src_ip, src_mac,
-                                                        dst_ip, dpid)
+            self.inception.server_proxy.rpc_broadcast_arp_request(
+                src_ip, src_mac, dst_ip, dpid)
         else:
-            dst_mac, dst_dcenter = self.ip_to_mac_dcenter[arp_header.dst_ip]
+            dst_mac = self.ip_to_mac[arp_header.dst_ip]
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (dst_mac=%s)",
                         dst_ip, dst_mac)
 
+            dst_dcenter, _, _ = self.mac_to_position[dst_mac]
             # Setup data forwarding flows
             if dst_dcenter == self.dcenter:
                 # Src and dst are in the same datacenter
                 self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
             else:
                 # Src and dst are in different datacenters
-                self.server_proxy.rpc_setup_inter_dcenter_flows(dst_mac,
-                                                                src_mac)
+                self.inception.server_proxy.rpc_setup_inter_dcenter_flows(
+                    dst_mac,
+                    src_mac)
                 self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
 
             # Send arp reply
@@ -176,9 +175,9 @@ class InceptionArp(object):
         Construct an arp reply given the specific arguments
         and send it through switch connecting dst_mac
         """
-        if dst_mac in self.mac_to_dpid_port:
+        if dst_mac in self.mac_to_position:
             # If I know to whom to forward back this ARP reply
-            dst_dpid, dst_port = (self.mac_to_dpid_port[dst_mac])
+            _, dst_dpid, dst_port = self.mac_to_position[dst_mac]
             # Forward ARP reply
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
                                 dst_mac=dst_mac,
@@ -217,7 +216,7 @@ class InceptionArp(object):
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
-        _, dst_dcenter = self.ip_to_mac_dcenter[dst_ip]
+        dst_dcenter, _, _ = self.mac_to_position[dst_mac]
         if dst_dcenter == self.dcenter:
             # Setup data forwarding flows
             self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
@@ -226,6 +225,7 @@ class InceptionArp(object):
         else:
             # An arp reply towards a remote server in another datacenter
             self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
-            self.server_proxy.rpc_setup_inter_dcenter_flows(dst_mac, src_mac)
-            self.server_proxy.rpc_send_arp_reply(src_ip, src_mac,
+            self.inception.server_proxy.rpc_setup_inter_dcenter_flows(dst_mac,
+                                                                      src_mac)
+            self.inception.server_proxy.rpc_send_arp_reply(src_ip, src_mac,
                                                  dst_ip, dst_mac)

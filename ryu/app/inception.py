@@ -25,6 +25,7 @@ from collections import defaultdict
 from kazoo import client
 from oslo.config import cfg
 from SimpleXMLRPCServer import SimpleXMLRPCServer
+from xmlrpclib import ServerProxy
 
 from ryu.app import inception_arp as i_arp
 from ryu.app import inception_conf as i_conf
@@ -59,6 +60,7 @@ CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('datacenter_id', 'ryu.app.inception_conf')
+CONF.import_opt('neighbor_dcenter_id', 'ryu.app.inception_conf')
 CONF.import_opt('remote_controller', 'ryu.app.inception_conf')
 
 
@@ -104,21 +106,24 @@ class Inception(app_manager.RyuApp):
         self.zk.ensure_path(i_conf.DPID_TO_CONNS)
         # TODO(chen): gateways have to be stored pairwise
         self.zk.ensure_path(i_conf.GATEWAY)
-        self.zk.ensure_path(i_conf.MAC_TO_DPID_PORT)
+        self.zk.ensure_path(i_conf.MAC_TO_POSITION)
         self.zk.ensure_path(i_conf.MAC_TO_FLOWS)
-        self.zk.ensure_path(i_conf.IP_TO_MAC_DCENTER)
+        self.zk.ensure_path(i_conf.IP_TO_MAC)
         self.zk.ensure_path(i_conf.DHCP_SWITCH_DPID)
         self.zk.ensure_path(i_conf.DHCP_SWITCH_PORT)
 
         # local caches of network data
         self.dpid_to_ip = {}
         self.dpid_to_conns = defaultdict(dict)
-        self.mac_to_dpid_port = {}
+        self.mac_to_position = {}
         self.mac_to_flows = defaultdict(dict)
-        self.ip_to_mac_dcenter = {}
-        # TODO(chen): Find a better way to store gateway info
+        self.ip_to_mac = {}
+        # FIXME(chen): Find a better way to store gateway info and dcenter_id
         self.gateway = None
         self.gateway_port = None
+        self.neighbor_dcenter = CONF.datacenter_id
+        # FIXME(chen): Need a way to read in datacenter information
+        self.dcenter_list = []
 
         self.switch_count = 0
         self.dcenter_id = CONF.datacenter_id
@@ -132,6 +137,7 @@ class Inception(app_manager.RyuApp):
         # RPC
         self.inception_rpc = i_rpc.InceptionRpc(self)
 
+        # rpc server
         host_addr = socket.gethostbyname(socket.gethostname())
         rpc_server = SimpleXMLRPCServer(
                         (host_addr, Inception.RPC_PORT),
@@ -140,6 +146,13 @@ class Inception(app_manager.RyuApp):
         rpc_server.register_instance(self.inception_rpc)
         # server_thread = threading.Thread(target=rpc_server.serve_forever)
         hub.spawn(rpc_server.serve_forever)
+
+        # rpc client
+        # TODO(chen): Multiple remote controllers
+        self.server_proxy = ServerProxy("http://" +
+                                        self.remote_controller +
+                                        ":" +
+                                        str(self.RPC_PORT))
 
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
@@ -317,15 +330,11 @@ class Inception(app_manager.RyuApp):
                     command=ofproto.OFPFC_ADD,
                     instructions=instruction_bcast_in))
 
-            # Finally, setup a default flow
-            # Process via normal L2/L3 legacy switch configuration
-            actions_norm = [
-                ofproto_parser.OFPActionOutput(
-                    ofproto.OFPP_NORMAL)]
+            # To prevent loop, all non-matching packets are dropped
             instruction_norm = [
                 datapath.ofproto_parser.OFPInstructionActions(
                     ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_norm)]
+                    [])]
             datapath.send_msg(
                 ofproto_parser.OFPFlowMod(
                     datapath=datapath,
@@ -339,6 +348,7 @@ class Inception(app_manager.RyuApp):
             if self.switch_count == Inception.SWITCH_NUMBER:
                 # Do failover
                 # TODO(chen): Failover with rpc
+                # FIXME(chen): Allow multiple logs
                 self._do_failover()
 
         # A switch disconnects
@@ -358,16 +368,16 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Del: (switch=%s) dpid_to_conns", dpid)
 
             # Delete all connected hosts
-            for mac_addr in self.mac_to_dpid_port.keys():
-                local_dpid, _ = self.mac_to_dpid_port[mac_addr]
+            for mac_addr in self.mac_to_position.keys():
+                _, local_dpid, _ = self.mac_to_position[mac_addr]
                 if local_dpid == dpid:
-                    del self.mac_to_dpid_port[mac_addr]
-                zk_path = os.path.join(i_conf.MAC_TO_DPID_PORT, mac_addr)
-                dpid_port, _ = self.zk.get(zk_path)
-                dpid_record, _ = i_util.str_to_tuple(dpid_port)
+                    del self.mac_to_position[mac_addr]
+                zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac_addr)
+                zk_data, _ = self.zk.get(zk_path)
+                _, dpid_record, _ = i_util.str_to_tuple(zk_data)
                 if dpid_record == dpid:
                     txn.delete(zk_path)
-            LOGGER.info("Del: (switch=%s) mac_to_dpid_port", dpid)
+            LOGGER.info("Del: (switch=%s) mac_to_position", dpid)
 
             # Delete all rules trackings
             for mac_addr in self.mac_to_flows.keys():
@@ -406,7 +416,8 @@ class Inception(app_manager.RyuApp):
         znode_name = i_util.tuple_to_str((dpid, in_port))
         log_path = os.path.join(CONF.zk_failover, znode_name)
         # FIXME: several log_path possible with multithread
-        self.zk.create(log_path, msg.data)
+        # FIXME(chen): Uncomment the following line
+        # self.zk.create(log_path, msg.data)
 
         txn = self.zk.transaction()
         self._process_packet_in(dpid, in_port, msg.data, txn)
@@ -438,145 +449,141 @@ class Inception(app_manager.RyuApp):
 
     def _do_source_learning(self, dpid, in_port, ethernet_src, txn):
         """Learn MAC => (switch dpid, switch port) mapping from a packet,
-        update data in i_conf.MAC_TO_DPID_PORT. Also set up flow table for
+        update data in i_conf.MAC_TO_POSITION. Also set up flow table for
         forwarding broadcast message.
         """
-        datapath = self.dpset.get(str_to_dpid(dpid))
-        ofproto_parser = datapath.ofproto_parser
-        ofproto = datapath.ofproto
-
-        if ethernet_src not in self.mac_to_dpid_port:
-            self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
-            dpid_port = i_util.tuple_to_str((dpid, in_port))
-            txn.create(os.path.join(i_conf.MAC_TO_DPID_PORT, ethernet_src),
-                       dpid_port)
-            LOGGER.info("Learn: (mac=%s) => (switch=%s, port=%s)",
-                        ethernet_src, dpid, in_port)
+        if ethernet_src not in self.mac_to_position:
+            self.update_host_position(ethernet_src, self.dcenter_id,
+                                      dpid, in_port, txn)
+            self.server_proxy.rpc_update_host_position(ethernet_src,
+                                                       self.dcenter_id)
             # Set unicast flow to ethernet_src
-            actions_unicast = [ofproto_parser.OFPActionOutput(int(in_port))]
-            instructions_unicast = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_unicast)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_dst=ethernet_src),
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    priority=i_priority.DATA_FWD,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_unicast))
+            self.set_unicast_flow(dpid, ethernet_src, in_port, txn)
             self.mac_to_flows[ethernet_src][dpid] = True
             txn.create(os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src))
             txn.create(os.path.join(i_conf.MAC_TO_FLOWS, ethernet_src, dpid))
-            LOGGER.info("Setup local forward flow on (switch=%s) towards "
-                        "(mac=%s)", dpid, ethernet_src)
         else:
-            dpid_record, _ = self.mac_to_dpid_port[ethernet_src]
-            # The host's switch changes, e.g., due to a VM live migration
-            if dpid_record != dpid:
-                ip = self.dpid_to_ip[dpid]
-                self.mac_to_dpid_port[ethernet_src] = (dpid, in_port)
-                dpid_port_new = i_util.tuple_to_str((dpid, in_port))
-                txn.set_data(os.path.join(i_conf.MAC_TO_DPID_PORT,
-                                          ethernet_src),
-                             dpid_port_new)
-                LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
-                            ethernet_src, dpid, in_port)
+            _, dpid_record, port_record = self.mac_to_position[ethernet_src]
+            # The host's switch changes, e.g., due to a VM migration
+            # We assume the environment is safe and attack is out of question
+            is_migrate = self.handle_migration(ethernet_src, dpid_record,
+                                               port_record, dpid, in_port, txn)
+            if not is_migrate:
+                return
 
-                # Add a flow on new datapath towards ethernet_src
-                flow_command = None
-                if dpid in self.mac_to_flows[ethernet_src]:
-                    flow_command = ofproto.OFPFC_MODIFY_STRICT
-                else:
-                    flow_command = ofproto.OFPFC_ADD
-                    self.mac_to_flows[ethernet_src][dpid] = True
-                    zk_path = os.path.join(i_conf.MAC_TO_FLOWS,
-                                           ethernet_src, dpid)
-                    txn.create(zk_path)
-                actions_inport = [ofproto_parser.OFPActionOutput(int(in_port))]
-                instructions_inport = [
-                    datapath.ofproto_parser.OFPInstructionActions(
-                        ofproto.OFPIT_APPLY_ACTIONS,
-                        actions_inport)]
-                datapath.send_msg(
-                    ofproto_parser.OFPFlowMod(
-                        datapath=datapath,
-                        match=ofproto_parser.OFPMatch(
-                            eth_dst=ethernet_src),
-                        cookie=0,
-                        command=flow_command,
-                        priority=i_priority.DATA_FWD,
-                        flags=ofproto.OFPFF_SEND_FLOW_REM,
-                        instructions=instructions_inport))
-                operation = ('Add' if flow_command == ofproto.OFPFC_ADD
-                             else 'Modify')
-                LOGGER.info("%s local forward flow on (switch=%s) towards "
-                            "(mac=%s)", operation, dpid, ethernet_src)
+            if (dpid_record, port_record) == (self.gateway, self.gateway_port):
+                # Migration involves another datacenter
+                self.server_proxy.rpc_migration_flow_update(ethernet_src,
+                                                            self.dcenter_id)
+                # TODO(chen): For all other datacenters, update gateway
+                self.server_proxy.rpc_gateway_flow_update(ethernet_src,
+                                                          self.dcenter_id)
 
-                # Mofidy flows on all other datapaths contacting ethernet_src
-                for remote_dpid in self.mac_to_flows[ethernet_src]:
-                    if remote_dpid == dpid:
-                        continue
+    def update_host_position(self, mac, dcenter, dpid,
+                             port, txn, migration=False):
+        """ Update host mac and its connected switch"""
+        self.mac_to_position[mac] = (dcenter, dpid, port)
+        zk_data = i_util.tuple_to_str((dcenter, dpid, port))
+        if migration:
+            txn.set_data(os.path.join(i_conf.MAC_TO_POSITION, mac),
+                       zk_data)
+        else:
+            txn.create(os.path.join(i_conf.MAC_TO_POSITION, mac),
+                       zk_data)
+        LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
+                    mac, dpid, port)
 
-                    remote_datapath = self.dpset.get(str_to_dpid(remote_dpid))
-                    remote_fwd_port, _ = self.dpid_to_conns[remote_dpid][ip]
-                    actions_remote = [ofproto_parser.OFPActionOutput(
-                        int(remote_fwd_port))]
-                    instructions_remote = [
-                        datapath.ofproto_parser.OFPInstructionActions(
-                            ofproto.OFPIT_APPLY_ACTIONS,
-                            actions_remote)]
-                    remote_datapath.send_msg(
-                        ofproto_parser.OFPFlowMod(
-                            datapath=remote_datapath,
-                            match=ofproto_parser.OFPMatch(
-                                eth_dst=ethernet_src),
-                            cookie=0,
-                            command=ofproto.OFPFC_MODIFY_STRICT,
-                            priority=i_priority.DATA_FWD,
-                            flags=ofproto.OFPFF_SEND_FLOW_REM,
-                            instructions=instructions_remote))
-                    LOGGER.info("Update remote forward flow on (switch=%s) "
-                                "towards (mac=%s)", remote_dpid, ethernet_src)
+    def handle_migration(self, mac, dpid_old, port_old,
+                         dpid_new, port_new, txn):
+        """ Set flows to handle VM migration properly
 
-    def set_unicast_flow(self, dpid, mac, port, txn):
+        @return: Boolean.
+            True: VM migration happens
+            False: No VM migration
+        """
+        if (dpid_old, port_old) == (dpid_new, port_new):
+            # No migration
+            return False
+
+        LOGGER.info("Handle VM migration")
+        self.update_host_position(mac, self.dcenter_id, dpid_new,
+                                  port_new, txn, True)
+
+        if dpid_old == dpid_new:
+            # Same switch migration: Only one flow on dpid_new needs changing
+            self.set_unicast_flow(dpid_new, mac, port_new, txn, False)
+            return True
+
+        if dpid_old != dpid_new:
+            # Different switch migration: two-step update
+            # Step 1: Install/Update a new flow at dpid_new towards mac.
+            ip = self.dpid_to_ip[dpid_new]
+            if dpid_new in self.mac_to_flows[mac]:
+                flow_add = False
+            else:
+                flow_add = True
+                self.mac_to_flows[mac][dpid_new] = True
+                zk_path = os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid_new)
+                txn.create(zk_path)
+            self.set_unicast_flow(dpid_new, mac, port_new, txn, flow_add)
+            operation = ('Add' if flow_add == True else 'Modify')
+            LOGGER.info("%s local forward flow on (switch=%s) towards "
+                        "(mac=%s)", operation, dpid_new, mac)
+
+            # Step 2: Redirect flows on dpids other than dpid_new towards mac.
+            for relate_dpid in self.mac_to_flows[mac]:
+                if relate_dpid == dpid_new:
+                    continue
+
+                fwd_port = self.dpid_to_conns[relate_dpid][ip]
+                self.set_unicast_flow(relate_dpid, mac, fwd_port, txn, False)
+                LOGGER.info("Update forward flow on (switch=%s) "
+                            "towards (mac=%s)", relate_dpid, mac)
+            return True
+
+    def set_unicast_flow(self, dpid, mac, port, txn, flow_add=True):
         """
         Set up a microflow for unicast on switch dpid towards mac
+
+        @param flow_add: Boolean value.
+            True: flow is added;
+            False: flow is modified.
         """
         datapath = self.dpset.get(str_to_dpid(dpid))
         ofproto = datapath.ofproto
         ofproto_parser = datapath.ofproto_parser
 
-        if dpid not in self.mac_to_flows[mac]:
-            actions = [ofproto_parser.OFPActionOutput(int(port))]
-            instructions_src = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_dst=mac),
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    priority=i_priority.DATA_FWD,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    instructions=instructions_src))
-            if mac not in self.mac_to_flows:
-                txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac))
-            self.mac_to_flows[mac][dpid] = True
-            txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid))
-            LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
-                        dpid, mac)
+        if flow_add:
+            flow_cmd = ofproto.OFPFC_ADD
+        else:
+            flow_cmd = ofproto.OFPFC_MODIFY_STRICT
+
+        actions = [ofproto_parser.OFPActionOutput(int(port))]
+        instructions_src = [
+            datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions)]
+        datapath.send_msg(
+            ofproto_parser.OFPFlowMod(
+                datapath=datapath,
+                match=ofproto_parser.OFPMatch(
+                    eth_dst=mac),
+                cookie=0,
+                command=flow_cmd,
+                priority=i_priority.DATA_FWD,
+                flags=ofproto.OFPFF_SEND_FLOW_REM,
+                instructions=instructions_src))
+        if mac not in self.mac_to_flows:
+            txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac))
+        self.mac_to_flows[mac][dpid] = True
+        txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac, dpid))
+        LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
+                    dpid, mac)
 
     def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn):
         LOGGER.info("Setup intra datacenter flows")
-        src_dpid, _ = self.mac_to_dpid_port[src_mac]
-        dst_dpid, _ = self.mac_to_dpid_port[dst_mac]
+        _, src_dpid, _ = self.mac_to_position[src_mac]
+        _, dst_dpid, _ = self.mac_to_position[dst_mac]
         # If src_dpid == dst_dpid, no need to set up flows
         if src_dpid == dst_dpid:
             return
@@ -599,14 +606,16 @@ class Inception(app_manager.RyuApp):
             commit_sig = True
 
         LOGGER.info("Setup inter datacenter flows")
-        local_dpid, _ = self.mac_to_dpid_port[local_mac]
+        _, local_dpid, _ = self.mac_to_position[local_mac]
         local_ip = self.dpid_to_ip[local_dpid]
         gateway_dpid = self.gateway
         gateway_ip = self.dpid_to_ip[gateway_dpid]
         local_fwd_port = self.dpid_to_conns[local_dpid][gateway_ip]
         gateway_fwd_port = self.dpid_to_conns[gateway_dpid][local_ip]
 
-        self.set_unicast_flow(gateway_dpid, remote_mac, self.gateway_port, txn)
+        if gateway_dpid not in self.mac_to_flows[remote_mac]:
+            self.set_unicast_flow(gateway_dpid, remote_mac,
+                                  self.gateway_port, txn)
         self.setup_fwd_flows(remote_mac, local_dpid, local_fwd_port,
                              local_mac, gateway_dpid, gateway_fwd_port, txn)
 
@@ -618,5 +627,7 @@ class Inception(app_manager.RyuApp):
         """Given two MAC addresses, set up flows on their connected switches
         towards each other, so that the two can forward packets in between.
         """
-        self.set_unicast_flow(src_dpid, dst_mac, src_port, txn)
-        self.set_unicast_flow(dst_dpid, src_mac, dst_port, txn)
+        if src_dpid not in self.mac_to_flows[dst_mac]:
+            self.set_unicast_flow(src_dpid, dst_mac, src_port, txn)
+        if dst_dpid not in self.mac_to_flows[src_mac]:
+            self.set_unicast_flow(dst_dpid, src_mac, dst_port, txn)

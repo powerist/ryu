@@ -47,6 +47,9 @@ CONF.register_opts([
     cfg.StrOpt('datacenter_id',
                default='0',
                help="Datacenter identification"),
+    cfg.StrOpt('neighbor_dcenter_id',
+               default='0',
+               help="Neighbor datacenter identification"),
     cfg.StrOpt('remote_controller',
                default='127.0.0.1',
                help="IP address of remote controllers"),
@@ -69,21 +72,20 @@ GATEWAY = os.path.join(CONF.zk_data, 'gateway')
 # Znode for storing gateway dpid
 # TODO(chen): Multiple gateways
 
-MAC_TO_DPID_PORT = os.path.join(CONF.zk_data, 'mac_to_dpid_port')
-# {MAC => (local dpid, local port)}
-# Path in ZooKeeper, under which records the switch ("dpid") to
-# which a local "mac" connects, as well as the "port" of the
-# connection.
+MAC_TO_POSITION = os.path.join(CONF.zk_data, 'mac_to_position')
+# {MAC => (datacenter id, local dpid, local port)}
+# Path in ZooKeeper, under which records datacenter in which "MAC" lies,
+# the switch ("dpid") to which "MAC" connects, and "port" of the connection.
 
 MAC_TO_FLOWS = os.path.join(CONF.zk_data, 'mac_to_flows')
 # {MAC => {dpid => (True)}}
 # Path in ZooKeeper, under which record "dpid"s that has installed
 # a rule forwarding packets to "mac".
 
-IP_TO_MAC_DCENTER = os.path.join(CONF.zk_data, 'ip_to_mac_dcenter')
-# {IP address => (MAC address, Datacenter ID)}
+IP_TO_MAC = os.path.join(CONF.zk_data, 'ip_to_mac')
+# {IP address => MAC address}
 # Path in ZooKeeper, under which records mapping from IP address
-# to (MAC address, Datacenter ID) of end hosts for address resolution
+# to MAC address of end hosts for address resolution
 
 DHCP_SWITCH_DPID = os.path.join(CONF.zk_data, 'dhcp_switch_dpid')
 # Path in ZooKeeper, under which records the switch to which DHCP
