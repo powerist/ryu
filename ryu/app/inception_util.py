@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2014 AT&T Labs All Rights Reserved.
 #    Copyright (C) 2014 University of Pennsylvania All Rights Reserved.
 #
