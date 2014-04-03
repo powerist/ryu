@@ -96,13 +96,10 @@ class Inception(app_manager.RyuApp):
         # TODO(chen): Very strange to have a topology view with DPID and IP
         # mixed. Try to hide the IPs and only present connections between
         # DPIDs.
-        self.zk.ensure_path(i_conf.DPID_TO_IP)
-        self.zk.ensure_path(i_conf.DPID_TO_CONNS)
         self.zk.ensure_path(i_conf.MAC_TO_POSITION)
         self.zk.ensure_path(i_conf.MAC_TO_FLOWS)
         self.zk.ensure_path(i_conf.IP_TO_MAC)
         # TODO(chen): gateways have to be stored pairwise
-        self.zk.ensure_path(i_conf.GATEWAY)
 
         # local in-memory caches of network data
         self.dpid_to_ip = {}
@@ -159,14 +156,11 @@ class Inception(app_manager.RyuApp):
             non_mesh_ports = []
 
             # Update {dpid => ip}
-            zk_path_ip = os.path.join(i_conf.DPID_TO_IP, dpid)
             self.dpid_to_ip[dpid] = ip
-            self.zk.ensure_path(zk_path_ip)
-            self.zk.set(zk_path_ip, ip)
             LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, ip)
 
             # Collect port information.  Sift out ports connecting peer
-            # switches and store them under i_conf.DPID_TO_CONNS
+            # switches and store them
             for port in event.ports:
                 # TODO(changbl): Use OVSDB. Parse the port name to get
                 # the IP address of remote host to which the bridge
@@ -183,10 +177,7 @@ class Inception(app_manager.RyuApp):
                     _, ip_suffix = port.name.split('_')
                     ip_suffix = ip_suffix.replace('-', '.')
                     peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
-                    zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid, peer_ip)
                     self.dpid_to_conns[dpid][peer_ip] = port_no
-                    self.zk.ensure_path(zk_path)
-                    self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid, peer_ip, port_no)
 
@@ -202,16 +193,10 @@ class Inception(app_manager.RyuApp):
                     else:
                         ip_prefix = '135.197'
                     remote_ip = '.'.join((ip_prefix, ip_suffix))
-                    zk_path = i_conf.GATEWAY
                     # TODO(chen): multiple gateways
                     self.gateway = dpid
-                    self.zk.set(zk_path, dpid)
-                    zk_path = os.path.join(i_conf.DPID_TO_CONNS, dpid,
-                                           remote_ip)
                     self.gateway_port = port_no
                     self.dpid_to_conns[dpid][remote_ip] = port_no
-                    self.zk.ensure_path(zk_path)
-                    self.zk.set(zk_path, port_no)
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid, peer_ip, port_no)
                     non_mesh_ports.append(port_no)
@@ -350,14 +335,11 @@ class Inception(app_manager.RyuApp):
 
             # Delete switch's mapping from switch dpid to remote IP address
             del self.dpid_to_ip[dpid]
-            txn.delete(os.path.join(i_conf.DPID_TO_IP, dpid))
             LOGGER.info("Del: (switch=%s) -> (ip=%s)",
                         dpid, self.dpid_to_ip[dpid])
 
             # Delete the switch's all connection info
             del self.dpid_to_conns[dpid]
-            txn.delete(os.path.join(i_conf.DPID_TO_CONNS, dpid),
-                       recursive=True)
             LOGGER.info("Del: (switch=%s) dpid_to_conns", dpid)
 
             # Delete all connected guests
@@ -470,14 +452,15 @@ class Inception(app_manager.RyuApp):
                 # TODO(chen): For all other datacenters, update gateway
                 self.rpc_client.update_gateway_flow(ethernet_src, self.dcenter)
 
-    def update_position(self, mac, dcenter, dpid, port, txn, migration=False):
+    def update_position(self, mac, dcenter, dpid, port, txn):
         """Update guest MAC and its connected switch"""
-        self.mac_to_position[mac] = (dcenter, dpid, port)
         zk_data = i_util.tuple_to_str((dcenter, dpid, port))
-        if migration:
-            txn.set_data(os.path.join(i_conf.MAC_TO_POSITION, mac), zk_data)
+        zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
+        if mac in self.mac_to_position:
+            txn.set_data(zk_path, zk_data)
         else:
-            txn.create(os.path.join(i_conf.MAC_TO_POSITION, mac), zk_data)
+            txn.create(zk_path, zk_data)
+        self.mac_to_position[mac] = (dcenter, dpid, port)
         LOGGER.info("Update: (mac=%s) => (switch=%s, port=%s)",
                     mac, dpid, port)
 
@@ -494,7 +477,7 @@ class Inception(app_manager.RyuApp):
             return False
 
         LOGGER.info("Handle VM migration")
-        self.update_position(mac, self.dcenter, dpid_new, port_new, txn, True)
+        self.update_position(mac, self.dcenter, dpid_new, port_new, txn)
 
         if dpid_old == dpid_new:
             # Same switch migration: Only one flow on dpid_new needs changing
@@ -596,15 +579,7 @@ class Inception(app_manager.RyuApp):
         self.setup_fwd_flows(dst_mac, src_dpid, src_fwd_port,
                              src_mac, dst_dpid, dst_fwd_port, txn)
 
-    def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn=None):
-        # use local transaction if available
-        if txn:
-            rpc_flag = False
-        # otherwise it is a RPC call, create a new transaction
-        else:
-            txn = self.zk.transaction()
-            rpc_flag = True
-
+    def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn):
         LOGGER.info("Setup inter datacenter flows")
 
         _, local_dpid, _ = self.mac_to_position[local_mac]
@@ -620,5 +595,3 @@ class Inception(app_manager.RyuApp):
         self.setup_fwd_flows(remote_mac, local_dpid, local_fwd_port,
                              local_mac, gateway_dpid, gateway_fwd_port, txn)
 
-        if rpc_flag:
-            txn.commit()

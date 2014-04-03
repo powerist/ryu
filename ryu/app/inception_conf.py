@@ -69,26 +69,6 @@ CONF.register_opts([
 ])
 
 """
-Path in ZooKeeper, under which records the local "IP" address of a
-host where a switch ("DPID") resides.
-
-{DPID => IP}
-"""
-DPID_TO_IP = os.path.join(CONF.zk_data, 'dpid_to_ip')
-
-"""
-Path in ZooKeeper, under which records the neighboring relations of
-each switch.
-
-"DPID": a host/switch.
-"IP": IP address of a remote neighboring host.
-"port": the local port which connects to the remote host.
-
-{DPID => {IP => port}}
-"""
-DPID_TO_CONNS = os.path.join(CONF.zk_data, 'dpid_to_conns')
-
-"""
 Path in ZooKeeper, under which records a datacenter ("dcenter") in
 which a guest VM ("MAC") resides, the switch ("DPID") the VM is connected
 to, and the "port" of the connection.
@@ -112,10 +92,3 @@ VM's "MAC" address for address resolution protocol (ARP).
 {IP => MAC}
 """
 IP_TO_MAC = os.path.join(CONF.zk_data, 'ip_to_mac')
-
-"""
-Znode in ZooKeeper for storing gateway switch DPID
-
-TODO(chen): Multiple gateways
-"""
-GATEWAY = os.path.join(CONF.zk_data, 'gateway')
