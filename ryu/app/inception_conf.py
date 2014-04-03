@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2014 AT&T Labs All Rights Reserved.
 #    Copyright (C) 2014 University of Pennsylvania All Rights Reserved.
 #
@@ -22,6 +20,8 @@
 import os
 
 from oslo.config import cfg
+
+from ryu.ofproto import ofproto_v1_2
 
 CONF = cfg.CONF
 
@@ -44,53 +44,78 @@ CONF.register_opts([
     cfg.StrOpt('ip_prefix',
                default='192.168',
                help="X1.X2 in your network's IP address X1.X2.X3.X4"),
-    cfg.StrOpt('datacenter_id',
+    cfg.StrOpt('dcenter',
                default='0',
                help="Datacenter identification"),
-    cfg.StrOpt('neighbor_dcenter_id',
+    cfg.IntOpt('rpc_port',
+               default=8000,
+               help="The port for XMLRPC call"),
+    cfg.ListOpt('ofp_versions',
+                default=[ofproto_v1_2.OFP_VERSION],
+                help="Default OpenFlow versions to use"),
+    # TODO: multiple neighbor datacenters
+    cfg.StrOpt('neighbor_dcenter',
                default='0',
                help="Neighbor datacenter identification"),
+    # TODO: multiple remote controllers
     cfg.StrOpt('remote_controller',
                default='127.0.0.1',
-               help="IP address of remote controllers"),
+               help="IP address of remote controller"),
+    # TODO: remove hardcoding
+    cfg.IntOpt('num_switches',
+               default=4,
+               help=("The number of switches in total for each datacenter,"
+                     " for failure recovery")),
 ])
 
+"""
+Path in ZooKeeper, under which records the local "IP" address of a
+host where a switch ("DPID") resides.
+
+{DPID => IP}
+"""
 DPID_TO_IP = os.path.join(CONF.zk_data, 'dpid_to_ip')
-# {dpid => local IP address}
-# Path in ZooKeeper, under which records the "IP address" of a VM
-# where a switch ("dpid") resides.
 
+"""
+Path in ZooKeeper, under which records the neighboring relations of
+each switch.
+
+"DPID": a host/switch.
+"IP": IP address of a remote neighboring host.
+"port": the local port which connects to the remote host.
+
+{DPID => {IP => port}}
+"""
 DPID_TO_CONNS = os.path.join(CONF.zk_data, 'dpid_to_conns')
-# {dpid => {remote IP address => local port}}
-# Path in ZooKeeper, under which records the neighboring relations
-# of each switch.
-# "IP address": address of remote VMs.
-# "port": port number of dpid connecting IP address.
-# dpid include gateway switches
 
-GATEWAY = os.path.join(CONF.zk_data, 'gateway')
-# Znode for storing gateway dpid
-# TODO(chen): Multiple gateways
+"""
+Path in ZooKeeper, under which records a datacenter ("dcenter") in
+which a guest VM ("MAC") resides, the switch ("DPID") the VM is connected
+to, and the "port" of the connection.
 
+{MAC => (dcenter, DPID, port)}
+"""
 MAC_TO_POSITION = os.path.join(CONF.zk_data, 'mac_to_position')
-# {MAC => (datacenter id, local dpid, local port)}
-# Path in ZooKeeper, under which records datacenter in which "MAC" lies,
-# the switch ("dpid") to which "MAC" connects, and "port" of the connection.
 
+"""
+Path in ZooKeeper, under which records each switch ("DPID") that has
+installed a flow which forwards data packets to VM ("MAC").
+
+{MAC => {DPID => (True)}}
+"""
 MAC_TO_FLOWS = os.path.join(CONF.zk_data, 'mac_to_flows')
-# {MAC => {dpid => (True)}}
-# Path in ZooKeeper, under which record "dpid"s that has installed
-# a rule forwarding packets to "mac".
 
+"""
+Path in ZooKeeper, under which records mapping from VM's "IP" address to
+VM's "MAC" address for address resolution protocol (ARP).
+
+{IP => MAC}
+"""
 IP_TO_MAC = os.path.join(CONF.zk_data, 'ip_to_mac')
-# {IP address => MAC address}
-# Path in ZooKeeper, under which records mapping from IP address
-# to MAC address of end hosts for address resolution
 
-DHCP_SWITCH_DPID = os.path.join(CONF.zk_data, 'dhcp_switch_dpid')
-# Path in ZooKeeper, under which records the switch to which DHCP
-# server connects
+"""
+Znode in ZooKeeper for storing gateway switch DPID
 
-DHCP_SWITCH_PORT = os.path.join(CONF.zk_data, 'dhcp_switch_port')
-# Path in ZooKeeper, under which records the port of switch on
-# which DHCP server connects
+TODO(chen): Multiple gateways
+"""
+GATEWAY = os.path.join(CONF.zk_data, 'gateway')

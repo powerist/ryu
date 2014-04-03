@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Copyright (C) 2014 AT&T Labs All Rights Reserved.
 #    Copyright (C) 2014 University of Pennsylvania All Rights Reserved.
 #
@@ -18,10 +16,7 @@
 #    under the License.
 
 import logging
-import os
 
-from ryu.app import inception_conf as i_conf
-from ryu.app import inception_util as i_util
 from ryu.lib.dpid import str_to_dpid
 
 LOGGER = logging.getLogger(__name__)
@@ -36,27 +31,25 @@ class InceptionDhcp(object):
     def __init__(self, inception):
         self.inception = inception
 
+        self.switch_dpid = None
+        self.switch_port = None
+
+        # name shortcuts
+        self.dpset = inception.dpset
+        self.mac_to_position = inception.mac_to_position
+
     def update_server(self, dpid, port):
-        dhcp_switch_dpid, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_DPID)
-        dhcp_switch_port, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_PORT)
-        if dhcp_switch_port and dhcp_switch_dpid:
+        if self.switch_dpid is not None and self.switch_port is not None:
             LOGGER.warning("DHCP-server-connected switch registered before!")
-        self.inception.zk.set(i_conf.DHCP_SWITCH_DPID, dpid)
-        self.inception.zk.set(i_conf.DHCP_SWITCH_PORT, port)
 
-    def get_server_info(self):
-        # Get tuple (dpid_of_dhcpserver, port_of_dhcpserver)
-        dhcp_switch_dpid, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_DPID)
-        dhcp_switch_port, _ = self.inception.zk.get(i_conf.DHCP_SWITCH_PORT)
-        return (dhcp_switch_dpid, dhcp_switch_port)
+        self.switch_dpid = dpid
+        self.switch_port = port
 
-    def handle(self, udp_header, ethernet_header, raw_data, txn):
+    def handle(self, udp_header, ethernet_header, raw_data):
         # Process DHCP packet
         LOGGER.info("Handle DHCP packet")
 
-        dhcp_switch_dpid, dhcp_switch_port = self.get_server_info()
-
-        if not dhcp_switch_dpid or not dhcp_switch_port:
+        if self.switch_dpid is None or self.switch_port is None:
             LOGGER.warning("No DHCP server has been found!")
             return
 
@@ -64,11 +57,11 @@ class InceptionDhcp(object):
         # to dhcp server and forward the packet
         if udp_header.src_port == DHCP_CLIENT_PORT:
             LOGGER.info("Forward DHCP message to server at (switch=%s) "
-                        "(port=%s)", dhcp_switch_dpid, dhcp_switch_port)
-            datapath = self.inception.dpset.get(str_to_dpid(dhcp_switch_dpid))
+                        "(port=%s)", self.switch_dpid, self.switch_port)
+            datapath = self.dpset.get(str_to_dpid(self.switch_dpid))
             action_out = [
                 datapath.ofproto_parser.OFPActionOutput(
-                    int(dhcp_switch_port))]
+                    int(self.switch_port))]
             datapath.send_msg(
                 datapath.ofproto_parser.OFPPacketOut(
                     datapath=datapath,
@@ -76,16 +69,15 @@ class InceptionDhcp(object):
                     in_port=datapath.ofproto.OFPP_LOCAL,
                     data=raw_data,
                     actions=action_out))
+
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
         elif udp_header.src_port == DHCP_SERVER_PORT:
-            dpid_port, _ = self.inception.zk.get(os.path.join(
-                i_conf.MAC_TO_DPID_PORT, ethernet_header.dst))
-            dpid, port = i_util.str_to_tuple(dpid_port)
+            _, dpid, port = self.mac_to_position(ethernet_header.dst)
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s, port=%s)",
                         ethernet_header.dst, dpid, port)
-            datapath = self.inception.dpset.get(str_to_dpid(dpid))
+            datapath = self.dpset.get(str_to_dpid(dpid))
             action_out = [datapath.ofproto_parser.OFPActionOutput(int(port))]
             datapath.send_msg(
                 datapath.ofproto_parser.OFPPacketOut(
