@@ -29,7 +29,9 @@ class InceptionRpc(object):
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac):
         """Set up flows towards gateway switch"""
-        self.inception.setup_inter_dcenter_flows(local_mac, remote_mac)
+        txn = self.zk.transaction()
+        self.inception.setup_inter_dcenter_flows(local_mac, remote_mac, txn)
+        txn.commit()
 
     def update_arp_mapping(self, ip, mac, dcenter):
         """Update remote ip_mac mapping"""

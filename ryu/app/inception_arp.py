@@ -50,7 +50,7 @@ class InceptionArp(object):
         self._do_arp_learning(arp_header, txn)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(dpid, in_port, arp_header, txn)
+            self._handle_arp_request(dpid, arp_header, txn)
         # Process ARP reply
         elif arp_header.opcode == arp.ARP_REPLY:
             self._handle_arp_reply(arp_header, txn)
@@ -68,17 +68,12 @@ class InceptionArp(object):
             self.rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter)
 
     def update_arp_mapping(self, ip, mac, dcenter, txn):
-        if ip in self.ip_to_mac:
-            is_update = True
-        else:
-            is_update = False
-        self.ip_to_mac[ip] = mac
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-        #TODO: Same action?
-        if is_update:
+        if ip in self.ip_to_mac:
             txn.set_data(zk_path_ip, mac)
         else:
-            txn.set_data(zk_path_ip, mac)
+            txn.create(zk_path_ip, mac)
+        self.ip_to_mac[ip] = mac
         LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)", ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
@@ -132,9 +127,8 @@ class InceptionArp(object):
             # TODO: Return arp reply
             pass
 
-    def _handle_arp_request(self, dpid, in_port, arp_header, txn):
+    def _handle_arp_request(self, dpid, arp_header, txn):
         """Process ARP request packet."""
-        #TODO: parameter "in_port" is not used
 
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
