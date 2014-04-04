@@ -45,12 +45,12 @@ class InceptionRpc(object):
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         self.inception_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
 
-    def update_position(self, mac, dcenter):
+    def update_position(self, mac, dcenter, vmac):
         txn = self.zk.transaction()
         gateway_dpid = self.inception.gateway
         gateway_port = self.inception.gateway_port
         self.inception.update_position(mac, dcenter, gateway_dpid,
-                                       gateway_port, txn)
+                                       gateway_port, vmac, txn)
         txn.commit()
 
     def update_migration_flow(self, mac, dcenter):

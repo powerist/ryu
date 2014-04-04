@@ -40,8 +40,8 @@ class InceptionArp(object):
         self.dcenter = inception.dcenter
         self.ip_to_mac = inception.ip_to_mac
         self.dpid_to_conns = inception.dpid_to_conns
+        self.dpid_to_vmac = inception.dpid_to_vmac
         self.mac_to_position = inception.mac_to_position
-        self.rpc_client = inception.rpc_client
 
     def handle(self, dpid, in_port, arp_header, txn):
         LOGGER.info("Handle ARP packet")
@@ -50,7 +50,7 @@ class InceptionArp(object):
         self._do_arp_learning(arp_header, txn)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(dpid, arp_header, txn)
+            self._handle_arp_request(dpid, in_port, arp_header, txn)
         # Process ARP reply
         elif arp_header.opcode == arp.ARP_REPLY:
             self._handle_arp_reply(arp_header, txn)
@@ -65,7 +65,8 @@ class InceptionArp(object):
 
         if src_ip not in self.ip_to_mac:
             self.update_arp_mapping(src_ip, src_mac, self.dcenter, txn)
-            self.rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter)
+            self.inception.rpc_client.update_arp_mapping(src_ip, src_mac,
+                                                         self.dcenter)
 
     def update_arp_mapping(self, ip, mac, dcenter, txn):
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
@@ -127,7 +128,7 @@ class InceptionArp(object):
             # TODO: Return arp reply
             pass
 
-    def _handle_arp_request(self, dpid, arp_header, txn):
+    def _handle_arp_request(self, dpid, in_port, arp_header, txn):
         """Process ARP request packet."""
 
         src_ip = arp_header.src_ip
@@ -139,31 +140,33 @@ class InceptionArp(object):
         if dst_ip not in self.ip_to_mac:
             self.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
             # TODO(chen): Multiple controllers
-            self.rpc_client.broadcast_arp_request(src_ip, src_mac, dst_ip,
-                                                  dpid)
+            self.inception.rpc_client.broadcast_arp_request(src_ip, src_mac,
+                                                            dst_ip, dpid)
         else:
             dst_mac = self.ip_to_mac[arp_header.dst_ip]
-            LOGGER.info("Cache hit: (dst_ip=%s) <=> (dst_mac=%s)",
-                        dst_ip, dst_mac)
+            dst_dcenter, _, _, vmac = self.mac_to_position[dst_mac]
 
-            dst_dcenter, _, _ = self.mac_to_position[dst_mac]
+            LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
+                        dst_ip, dst_mac, vmac)
 
             # Setup data forwarding flows
             if dst_dcenter == self.dcenter:
                 # Src and dst are in the same datacenter
-                self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
+                self.inception.setup_intra_dcenter_flows(src_mac, dst_mac,
+                                                         txn)
             else:
                 # Src and dst are in different datacenters
                 self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
-                self.rpc_client.setup_inter_dcenter_flows(dst_mac, src_mac)
+                self.inception.rpc_client.setup_inter_dcenter_flows(dst_mac,
+                                                                    src_mac)
 
             # Send arp reply
-            src_mac_reply = dst_mac
-            dst_mac_reply = src_mac
+            src_mac_reply = vmac
+            vmac_reply = src_mac
             src_ip_reply = dst_ip
             dst_ip_reply = src_ip
             self.send_arp_reply(src_ip_reply, src_mac_reply,
-                                dst_ip_reply, dst_mac_reply)
+                                dst_ip_reply, vmac_reply)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         """
@@ -172,7 +175,7 @@ class InceptionArp(object):
         """
         if dst_mac in self.mac_to_position:
             # If I know to whom to forward back this ARP reply
-            _, dst_dpid, dst_port = self.mac_to_position[dst_mac]
+            _, dst_dpid, dst_port, _ = self.mac_to_position[dst_mac]
             # Forward ARP reply
             arp_reply = arp.arp(opcode=arp.ARP_REPLY,
                                 dst_mac=dst_mac,
@@ -211,16 +214,19 @@ class InceptionArp(object):
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
-        dst_dcenter, _, _ = self.mac_to_position[dst_mac]
+        dst_dcenter, _, _, _ = self.mac_to_position[dst_mac]
+        _, _, _, src_vmac = self.mac_to_position[src_mac]
 
         if dst_dcenter == self.dcenter:
             # Setup data forwarding flows
             self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
             # An arp reply towards a local server
-            self.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)
+            self.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
 
         else:
             # An arp reply towards a remote server in another datacenter
             self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
-            self.rpc_client.setup_inter_dcenter_flows(dst_mac, src_mac)
-            self.rpc_client.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)
+            self.inception.rpc_client.setup_inter_dcenter_flows(dst_mac,
+                                                                src_mac)
+            self.inception.rpc_client.send_arp_reply(src_ip, src_vmac, dst_ip,
+                                                     dst_mac)
