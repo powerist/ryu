@@ -71,17 +71,25 @@ CONF.register_opts([
 """
 Path in ZooKeeper, under which records a datacenter ("dcenter") in
 which a guest VM ("MAC") resides, the switch ("DPID") the VM is connected
-to, and the "port" of the connection.
+to, the "port" of the connection, and its virtual mac.
 
-{MAC => (dcenter, DPID, port)}
+{MAC => (dcenter, dpid, port, vmac)}
 """
 MAC_TO_POSITION = os.path.join(CONF.zk_data, 'mac_to_position')
 
 """
-Path in ZooKeeper, under which records each switch ("DPID") that has
-installed a flow which forwards data packets to VM ("MAC").
+Path in ZooKeeper, under which records the vm id numbers that
+have been assigned.
 
-{MAC => {DPID => (True)}}
+{dpid => {id => true}}
+"""
+DPID_TO_ID = os.path.join(CONF.zk_data, 'dpid_to_id')
+
+"""
+Path in ZooKeeper, under which records each switch ("DPID") that has
+installed a flow which forwards data packets to a specific MAC address.
+
+{MAC => {dpid => (True)}}
 """
 MAC_TO_FLOWS = os.path.join(CONF.zk_data, 'mac_to_flows')
 
@@ -92,3 +100,15 @@ VM's "MAC" address for address resolution protocol (ARP).
 {IP => MAC}
 """
 IP_TO_MAC = os.path.join(CONF.zk_data, 'ip_to_mac')
+
+"""
+Path in ZooKeeper, under which records mapping from switch ("DPID") to
+its virtual "MAC" address.
+
+{dpid => vmac}
+"""
+DPID_TO_VMAC = os.path.join(CONF.zk_data, 'dpid_to_vmac')
+
+DCENTER_MASK = "ff:ff:00:00:00:00"
+SWITCH_MASK = "ff:ff:ff:ff:00:00"
+VM_MASK = "ff:ff:ff:ff:ff:00"
