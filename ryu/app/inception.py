@@ -108,12 +108,14 @@ class Inception(app_manager.RyuApp):
 
         # local in-memory caches of network data
         self.dpid_to_ip = {}
+        self.ip_to_dpid = {}
+
         self.dpid_to_conns = defaultdict(dict)
         self.mac_to_position = {}
         self.dpid_to_id = defaultdict(dict)
         self.mac_to_flows = defaultdict(dict)
         self.ip_to_mac = {}
-        # Switch prefix
+        # Switch virtual MAC
         self.dpid_to_vmac = {}
         # TODO(chen): Find a better way to store gateway info and dcenter
         self.gateway = None
@@ -181,6 +183,7 @@ class Inception(app_manager.RyuApp):
 
             # Update {dpid => ip}
             self.dpid_to_ip[dpid] = ip
+            self.ip_to_dpid[ip] = dpid
             LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, ip)
 
             # Collect port information.  Sift out ports connecting peer
@@ -204,6 +207,15 @@ class Inception(app_manager.RyuApp):
                     self.dpid_to_conns[dpid][peer_ip] = port_no
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid, peer_ip, port_no)
+                    peer_dpid = self.ip_to_dpid.get(peer_ip)
+                    # Install switch-to-switch flow
+                    if peer_dpid is not None:
+                        peer_vmac = self.dpid_to_vmac[peer_dpid]
+                        swc_mask = i_conf.SWITCH_MASK
+                        txn = self.zk.transaction()
+                        self.set_nonlocal_flow(dpid, peer_vmac, swc_mask,
+                                               port_no, txn)
+                        txn.commit()
 
                 elif port.name == 'eth_dhcpp':
                     LOGGER.info("DHCP server is found!")
@@ -217,6 +229,7 @@ class Inception(app_manager.RyuApp):
                     else:
                         ip_prefix = '135.197'
                     remote_ip = '.'.join((ip_prefix, ip_suffix))
+                    peer_dc_vmac = i_util.create_dc_vmac(dcenter)
                     # TODO(chen): multiple gateways
                     self.gateway = dpid
                     self.gateway_port = port_no
@@ -224,6 +237,12 @@ class Inception(app_manager.RyuApp):
                     LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                                 dpid, peer_ip, port_no)
                     non_mesh_ports.append(port_no)
+                    # Install datacenter-to-datacenter flow
+                    dc_mask = i_conf.DCENTER_MASK
+                    txn = self.zk.transaction()
+                    self.set_nonlocal_flow(dpid, peer_dc_vmac, dc_mask,
+                                           port_no, txn)
+                    txn.commit()
 
                 else:
                     # Store the port connecting local guests
@@ -358,6 +377,8 @@ class Inception(app_manager.RyuApp):
             txn = self.zk.transaction()
 
             # Delete switch's mapping from switch dpid to remote IP address
+            ip = self.dpid_to_ip[dpid]
+            del self.ip_to_dpid[ip]
             del self.dpid_to_ip[dpid]
             LOGGER.info("Del: (switch=%s) -> (ip=%s)",
                         dpid, self.dpid_to_ip[dpid])
@@ -602,45 +623,3 @@ class Inception(app_manager.RyuApp):
 
         LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
                     dpid, mac_record)
-
-    def setup_intra_dcenter_flows(self, src_mac, dst_mac, txn):
-        """Set up an intra datacenter unicast flow from guest src_mac
-        to guest dst_mac.
-        """
-        _, src_dpid, _, src_vmac = self.mac_to_position[src_mac]
-        _, dst_dpid, _, dst_vmac = self.mac_to_position[dst_mac]
-
-        # If src_dpid == dst_dpid, no need to set up flows
-        if src_dpid == dst_dpid:
-            return
-
-        LOGGER.info("Setup intra datacenter flows")
-
-        src_ip = self.dpid_to_ip[src_dpid]
-        dst_ip = self.dpid_to_ip[dst_dpid]
-        src_fwd_port = self.dpid_to_conns[src_dpid][dst_ip]
-        dst_fwd_port = self.dpid_to_conns[dst_dpid][src_ip]
-        mask = i_conf.SWITCH_MASK
-
-        self.set_nonlocal_flow(src_dpid, dst_vmac, mask, src_fwd_port, txn)
-        self.set_nonlocal_flow(dst_dpid, src_vmac, mask, dst_fwd_port, txn)
-
-    def setup_inter_dcenter_flows(self, local_mac, remote_mac, txn):
-        LOGGER.info("Setup inter datacenter flows")
-
-        _, local_dpid, _, local_vmac = self.mac_to_position[local_mac]
-        _, _, _, remote_vmac = self.mac_to_position[remote_mac]
-        local_ip = self.dpid_to_ip[local_dpid]
-        gateway_dpid = self.gateway
-        gateway_ip = self.dpid_to_ip[gateway_dpid]
-        local_fwd_port = self.dpid_to_conns[local_dpid][gateway_ip]
-        gateway_fwd_port = self.dpid_to_conns[gateway_dpid][local_ip]
-        dcenter_mask = i_conf.DCENTER_MASK
-        switch_mask = i_conf.SWITCH_MASK
-
-        self.set_nonlocal_flow(gateway_dpid, remote_vmac, dcenter_mask,
-                              self.gateway_port, txn)
-        self.set_nonlocal_flow(gateway_dpid, local_vmac, switch_mask,
-                              gateway_fwd_port, txn)
-        self.set_nonlocal_flow(local_dpid, remote_vmac, dcenter_mask,
-                              local_fwd_port, txn)
