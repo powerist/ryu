@@ -144,21 +144,10 @@ class InceptionArp(object):
                                                             dst_ip, dpid)
         else:
             dst_mac = self.ip_to_mac[arp_header.dst_ip]
-            dst_dcenter, _, _, vmac = self.mac_to_position[dst_mac]
+            _, _, _, vmac = self.mac_to_position[dst_mac]
 
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
                         dst_ip, dst_mac, vmac)
-
-            # Setup data forwarding flows
-            if dst_dcenter == self.dcenter:
-                # Src and dst are in the same datacenter
-                self.inception.setup_intra_dcenter_flows(src_mac, dst_mac,
-                                                         txn)
-            else:
-                # Src and dst are in different datacenters
-                self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
-                self.inception.rpc_client.setup_inter_dcenter_flows(dst_mac,
-                                                                    src_mac)
 
             # Send arp reply
             src_mac_reply = vmac
@@ -218,15 +207,10 @@ class InceptionArp(object):
         _, _, _, src_vmac = self.mac_to_position[src_mac]
 
         if dst_dcenter == self.dcenter:
-            # Setup data forwarding flows
-            self.inception.setup_intra_dcenter_flows(src_mac, dst_mac, txn)
             # An arp reply towards a local server
             self.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
 
         else:
             # An arp reply towards a remote server in another datacenter
-            self.inception.setup_inter_dcenter_flows(src_mac, dst_mac, txn)
-            self.inception.rpc_client.setup_inter_dcenter_flows(dst_mac,
-                                                                src_mac)
             self.inception.rpc_client.send_arp_reply(src_ip, src_vmac, dst_ip,
                                                      dst_mac)

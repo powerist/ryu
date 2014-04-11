@@ -40,7 +40,22 @@ def generate_vm_id(last_id, bound=65535):
 
 
 # TODO(chen): Class VMAC
-def create_swc_vmac(dcenter, switch_num):
+def create_dc_vmac(dcenter):
+    """Generate MAC address for datacenter based on datacenter id.
+
+    Address form: xx:xx:00:00:00:00
+    xx:xx is converted from data center id
+    """
+    if dcenter > 65535:
+        return
+
+    dcenter_high = (dcenter >> 8) & 0xff
+    dcenter_low = dcenter & 0xff
+    dcenter_vmac = "%02x:%02x:00:00:00:00" % (dcenter_high, dcenter_low)
+    return dcenter_vmac
+
+
+def create_swc_vmac(dcenter_vmac, switch_num):
     """Generate MAC address prefix for switch based on
     datacenter id and switch id.
 
@@ -48,13 +63,11 @@ def create_swc_vmac(dcenter, switch_num):
     xx:xx is converted from data center id
     yy:yy is converted from switch id
     """
-    if dcenter > 65535 and switch_num > 65535:
+    if switch_num > 65535:
         # Invalid numbers
         return
 
-    dcenter_high = (dcenter >> 8) & 0xff
-    dcenter_low = dcenter & 0xff
-    dcenter_prefix = "%02x:%02x" % (dcenter_high, dcenter_low)
+    dcenter_prefix = get_dc_prefix(dcenter_vmac)
 
     switch_high = (switch_num >> 8) & 0xff
     switch_low = switch_num & 0xff
