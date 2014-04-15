@@ -21,8 +21,8 @@ from ryu.lib.dpid import str_to_dpid
 
 LOGGER = logging.getLogger(__name__)
 
-DHCP_SERVER_PORT = 67
-DHCP_CLIENT_PORT = 68
+SERVER_PORT = 67
+CLIENT_PORT = 68
 
 
 class InceptionDhcp(object):
