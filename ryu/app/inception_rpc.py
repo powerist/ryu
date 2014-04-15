@@ -25,6 +25,7 @@ class InceptionRpc(object):
         # name shortcuts
         self.zk = inception.zk
         self.mac_to_position = self.inception.mac_to_position
+        self.dpid_to_conns = self.inception.dpid_to_conns
         self.inception_arp = inception.inception_arp
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac):
@@ -45,29 +46,28 @@ class InceptionRpc(object):
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         self.inception_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
 
-    def update_position(self, mac, dcenter, vmac):
+    def update_position(self, mac, dcenter, dpid, port, vmac):
         txn = self.zk.transaction()
-        gateway_dpid = self.inception.gateway
-        gateway_port = self.inception.gateway_port
-        self.inception.update_position(mac, dcenter, gateway_dpid,
-                                       gateway_port, vmac, txn)
+        self.inception.update_position(mac, dcenter, dpid, port, vmac, txn)
         txn.commit()
 
-    def update_migration_flow(self, mac, dcenter):
+    def redirect_flow(self, dpid_old, vmac_old, vmac_new, dcenter_new):
         """
-        Update flows towards a used-to-own mac,
+        Update a local flow towards a used-to-own mac,
         mac has been migrated to the datacenter who calls the rpc
         """
         txn = self.zk.transaction()
-        _, dpid_old, port_old = self.mac_to_position[mac]
+        if dcenter_new == self.inception.dcenter:
+            return
+
         # TODO(chen): A smarter way to get gateway through dcenter
         # Now we assume there are only two datacenters
         gateway_dpid = self.inception.gateway
-        gateway_port = self.inception.gateway_port
-        self.inception.handle_migration(mac, dpid_old, port_old,
-                                        gateway_dpid, gateway_port, txn)
-        self.inception.update_position(mac, dcenter, gateway_dpid,
-                                       gateway_port, txn)
+        gateway_ip = self.inception.dpid_to_ip[gateway_dpid]
+        fwd_port = self.inception.dpid_to_conns[dpid_old][gateway_ip]
+
+        self.inception.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port,
+                                      txn, False)
         txn.commit()
 
     def update_gateway_flow(self, mac, dcenter):
