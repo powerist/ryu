@@ -277,56 +277,41 @@ class Inception(app_manager.RyuApp):
             instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions_arp)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_type=ether.ETH_TYPE_ARP),
-                    priority=i_priority.ARP,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instruction_arp))
+            match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
+            self.set_flow(datapth=datapath,
+                          match=match_arp,
+                          priority=i_priority.ARP,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_arp)
 
             # Set up two flows for DHCP messages
+            actions_dhcp = [ofproto_parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER)]
+            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions_dhcp)]
+            match_client = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
+                                                   ip_proto=inet.IPPROTO_UDP,
+                                                   udp_src=i_dhcp.CLIENT_PORT)
+            match_server = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
+                                                   ip_proto=inet.IPPROTO_UDP,
+                                                   udp_src=i_dhcp.SERVER_PORT)
             # (1) Intercept all DHCP request packets and send to the controller
-            actions_dhcp = [ofproto_parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER)]
-            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_dhcp)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_type=ether.ETH_TYPE_IP,
-                        ip_proto=inet.IPPROTO_UDP,
-                        udp_src=i_dhcp.DHCP_CLIENT_PORT),
-                    priority=i_priority.DHCP,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instruction_dhcp))
+            self.set_flow(datapath=datapath,
+                          match=match_client,
+                          priority=i_priority.DHCP,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_dhcp)
             # (2) Intercept all DHCP reply packets and send to the controller
-            actions_dhcp = [ofproto_parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER)]
-            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_dhcp)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_type=ether.ETH_TYPE_IP,
-                        ip_proto=inet.IPPROTO_UDP,
-                        udp_src=i_dhcp.DHCP_SERVER_PORT),
-                    priority=i_priority.DHCP,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instruction_dhcp))
+            self.set_flow(datapath=datapath,
+                          match=match_server,
+                          priority=i_priority.DHCP,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_dhcp)
 
             # Set up two parts of flows for broadcast messages
             # (1) Broadcast messages from each non-mesh port: forward to all
@@ -339,17 +324,14 @@ class Inception(app_manager.RyuApp):
                     datapath.ofproto_parser.OFPInstructionActions(
                         ofproto.OFPIT_APPLY_ACTIONS,
                         actions_bcast_out)]
-                datapath.send_msg(
-                    ofproto_parser.OFPFlowMod(
-                        datapath=datapath,
-                        match=ofproto_parser.OFPMatch(
-                            in_port=int(port_no),
-                            eth_dst=mac.BROADCAST_STR),
-                        priority=i_priority.HOST_BCAST,
-                        flags=ofproto.OFPFF_SEND_FLOW_REM,
-                        cookie=0,
-                        command=ofproto.OFPFC_ADD,
-                        instructions=instructions_bcast_out))
+                match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
+                                                    eth_dst=mac.BROADCAST_STR),
+                self.set_flow(datapath=datapath,
+                              match=match_out,
+                              priority=i_priority.HOST_BCAST,
+                              flags=ofproto.OFPFF_SEND_FLOW_REM,
+                              command=ofproto.OFPFC_ADD,
+                              instructions=instructions_bcast_out)
             # (2) Broadcast messages from each (tunnel) port: forward
             # to all local ports. Since i_priority.SWITCH_BCAST <
             # i_priority.HOST_BCAST, this guarantees that only
@@ -361,31 +343,26 @@ class Inception(app_manager.RyuApp):
                 ofproto_parser.OFPInstructionActions(
                     ofproto.OFPIT_APPLY_ACTIONS,
                     actions_bcast_in)]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(
-                        eth_dst=mac.BROADCAST_STR),
-                    priority=i_priority.SWITCH_BCAST,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instruction_bcast_in))
+            match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
+            self.set_flow(datapath=datapath, 
+                          match=match_in, 
+                          priority=i_priority.SWITCH_BCAST,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_bcast_in)
 
             # To prevent loop, all non-matching packets are dropped
             instruction_norm = [
                 datapath.ofproto_parser.OFPInstructionActions(
                     ofproto.OFPIT_APPLY_ACTIONS,
                     [])]
-            datapath.send_msg(
-                ofproto_parser.OFPFlowMod(
-                    datapath=datapath,
-                    match=ofproto_parser.OFPMatch(),
-                    priority=i_priority.NORMAL,
-                    flags=ofproto.OFPFF_SEND_FLOW_REM,
-                    cookie=0,
-                    command=ofproto.OFPFC_ADD,
-                    instructions=instruction_norm))
+            match_norm = ofproto_parser.OFPMatch()
+            self.set_flow(datapth=datapath,
+                          match=match_norm,
+                          priority=i_priority.NORMAL,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_norm)
 
             # TODO(chen): Better way to manage topology
             # Install datacenter-to-datacenter flow
@@ -495,8 +472,8 @@ class Inception(app_manager.RyuApp):
             ip_header = whole_packet.get_protocol(ipv4.ipv4)
             if ip_header.proto == inet.IPPROTO_UDP:
                 udp_header = whole_packet.get_protocol(udp.udp)
-                if udp_header.src_port in (i_dhcp.DHCP_CLIENT_PORT,
-                                           i_dhcp.DHCP_SERVER_PORT):
+                if udp_header.src_port in (i_dhcp.CLIENT_PORT,
+                                           i_dhcp.SERVER_PORT):
                     self.inception_dhcp.handle(udp_header, ethernet_header,
                                                data)
 
@@ -532,6 +509,20 @@ class Inception(app_manager.RyuApp):
                                                       self.dcenter)
                 # TODO(chen): For all other datacenters, update gateway
                 self.rpc_client.update_gateway_flow(ethernet_src, self.dcenter)
+
+    def set_flow(self, datapath, match, priority, flags, command,
+                 instructions):
+        # Send OFPFlowMod instruction to datapath
+        parser = datapath.ofproto_parser
+
+        datapath.send_msg(
+            parser.OFPFlowMod(
+                datapath=datapath,
+                match=match,
+                priority=priority,
+                flags=flags,
+                command=command,
+                instructions=instructions))
 
     def update_position(self, mac, dcenter, dpid, port, vmac, txn):
         """Update guest MAC and its connected switch"""
@@ -629,16 +620,13 @@ class Inception(app_manager.RyuApp):
             datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions)]
-        datapath.send_msg(
-            ofproto_parser.OFPFlowMod(
-                datapath=datapath,
-                match=ofproto_parser.OFPMatch(
-                    eth_dst=vmac),
-                cookie=0,
-                command=flow_cmd,
-                priority=i_priority.DATA_FWD,
-                flags=ofproto.OFPFF_SEND_FLOW_REM,
-                instructions=instructions))
+        match = ofproto_parser.OFPMatch(eth_dst=vmac)
+        self.set_flow(datapth=datapath,
+                      match=match,
+                      priority=i_priority.DATA_FWD,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=flow_cmd,
+                      instructions=instructions)
 
     def set_nonlocal_flow(self, dpid, mac, mask, port, txn, flow_add=True):
         """Set up a microflow for unicast on switch DPID towards MAC
@@ -669,16 +657,13 @@ class Inception(app_manager.RyuApp):
             datapath.ofproto_parser.OFPInstructionActions(
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions)]
-        datapath.send_msg(
-            ofproto_parser.OFPFlowMod(
-                datapath=datapath,
-                match=ofproto_parser.OFPMatch(
-                    eth_dst=(mac, mask)),
-                cookie=0,
-                command=flow_cmd,
-                priority=i_priority.DATA_FWD,
-                flags=ofproto.OFPFF_SEND_FLOW_REM,
-                instructions=instructions_src))
+        match_src = ofproto_parser.OFPMatch(eth_dst=(mac, mask))
+        self.set_flow(datapath=datapath,
+                      match=match_src,
+                      priority=i_priority.DATA_FWD,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=flow_cmd,
+                      instructions=instructions_src)
 
         if mac_record not in self.mac_to_flows:
             txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac_record))
