@@ -54,7 +54,7 @@ CONF.register_opts([
                 default=[ofproto_v1_2.OFP_VERSION],
                 help="Default OpenFlow versions to use"),
     # TODO: multiple neighbor datacenters
-    cfg.StrOpt('neighbor_dcenter',
+    cfg.StrOpt('peer_dcenters',
                default='0',
                help="Neighbor datacenter identification"),
     # TODO: multiple remote controllers
