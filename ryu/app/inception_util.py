@@ -32,6 +32,17 @@ def str_to_tuple(data_string, sep=','):
     return data_tuple
 
 
+def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
+    """Convert string to dictionary"""
+    peer_dcs_list = peer_dcenters.split(out_sep)
+    peer_dcs_dic = {}
+    for peer_dc in peer_dcs_list:
+        peer_list = peer_dc.split(in_sep)
+        peer_dcs_dic[peer_list[0]] = (peer_list[1], peer_list[2])
+
+    return peer_dcs_dic
+
+
 def generate_vm_id(last_id, bound=65535):
     """Generate a new vm_id,
     00 is saved for switch"""

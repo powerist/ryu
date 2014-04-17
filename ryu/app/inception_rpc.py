@@ -60,8 +60,6 @@ class InceptionRpc(object):
         if dcenter_new == self.inception.dcenter:
             return
 
-        # TODO(chen): A smarter way to get gateway through dcenter
-        # Now we assume there are only two datacenters
         gateway_dpid = self.inception.gateway
         gateway_ip = self.inception.dpid_to_ip[gateway_dpid]
         fwd_port = self.inception.dpid_to_conns[dpid_old][gateway_ip]
@@ -69,9 +67,3 @@ class InceptionRpc(object):
         self.inception.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port,
                                       txn, False)
         txn.commit()
-
-    def update_gateway_flow(self, mac, dcenter):
-        """ Update gateway flow towards mac migrated to dcenter"""
-        # TODO(chen): Change gateway flow
-        # TODO(chen): Update new mac position
-        pass
