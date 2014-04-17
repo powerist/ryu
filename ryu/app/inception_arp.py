@@ -19,6 +19,7 @@ import logging
 import os
 
 from ryu.app import inception_conf as i_conf
+from ryu.lib import mac
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.dpid import str_to_dpid
 from ryu.lib.packet import arp
@@ -89,19 +90,11 @@ class InceptionArp(object):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                         dst_ip)
 
-            arp_request = arp.arp(opcode=arp.ARP_REQUEST,
-                                  dst_mac='ff:ff:ff:ff:ff:ff',
-                                  src_mac=src_mac,
-                                  dst_ip=dst_ip,
-                                  src_ip=src_ip)
-            eth_request = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
-                                            src=src_mac,
-                                            dst='ff:ff:ff:ff:ff:ff')
-            packet_request = packet.Packet()
-            packet_request.add_protocol(eth_request)
-            packet_request.add_protocol(arp_request)
-            packet_request.serialize()
-
+            packet_request = self.create_arp_packet(src_mac,
+                                                    mac.BROADCAST_STR,
+                                                    dst_ip,
+                                                    src_ip,
+                                                    arp.ARP_REQUEST)
             for dpid, dps_datapath in self.dpset.dps.items():
                 dpid = dpid_to_str(dpid)
                 if dps_datapath.id == dpid:
@@ -128,6 +121,24 @@ class InceptionArp(object):
             # ARP entry found in local table
             # TODO: Return arp reply
             pass
+
+    def create_arp_packet(self, src_mac, dst_mac, dst_ip, src_ip, opcode):
+        """Create an Ethernet packet, with ARP packet inside"""
+
+        arp_packet = arp.arp(opcode=opcode,
+                              dst_mac=dst_mac,
+                              src_mac=src_mac,
+                              dst_ip=dst_ip,
+                              src_ip=src_ip)
+        eth_packet = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
+                                        src=src_mac,
+                                        dst=dst_mac)
+        packet = packet.Packet()
+        packet.add_protocol(eth_packet)
+        packet.add_protocol(arp_packet)
+        packet.serialize()
+
+        return packet
 
     def _handle_arp_request(self, dpid, in_port, arp_header, txn):
         """Process ARP request packet."""
@@ -166,19 +177,8 @@ class InceptionArp(object):
             # If I know to whom to forward back this ARP reply
             _, dst_dpid, dst_port, _ = self.mac_to_position[dst_mac]
             # Forward ARP reply
-            arp_reply = arp.arp(opcode=arp.ARP_REPLY,
-                                dst_mac=dst_mac,
-                                src_mac=src_mac,
-                                dst_ip=dst_ip,
-                                src_ip=src_ip)
-            eth_reply = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
-                                          src=src_mac,
-                                          dst=dst_mac)
-            packet_reply = packet.Packet()
-            packet_reply.add_protocol(eth_reply)
-            packet_reply.add_protocol(arp_reply)
-            packet_reply.serialize()
-
+            packet_reply = self.create_arp_packet(src_mac, dst_mac, dst_ip,
+                                                  src_ip, arp.ARP_REPLY)
             dst_datapath = self.dpset.get(str_to_dpid(dst_dpid))
             dst_ofproto_parser = dst_datapath.ofproto_parser
             dst_ofproto = dst_datapath.ofproto

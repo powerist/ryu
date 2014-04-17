@@ -137,6 +137,11 @@ class Inception(app_manager.RyuApp):
         # RPC
         self.inception_rpc = i_rpc.InceptionRpc(self)
 
+        self.setup_rpc()
+
+    def setup_rpc(self):
+        """Set up RPC server and RPC client to other controllers"""
+
         # RPC server
         host_addr = socket.gethostbyname(socket.gethostname())
         rpc_server = SimpleXMLRPCServer((host_addr, CONF.rpc_port),
@@ -158,225 +163,21 @@ class Inception(app_manager.RyuApp):
         """Handle when a switch event is received."""
         datapath = event.dp
         dpid = dpid_to_str(datapath.id)
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
         txn = self.zk.transaction()
 
         # A new switch connects
         if event.enter:
             self.switch_count += 1
             socket = datapath.socket
-            ip, port = socket.getpeername()
-            non_mesh_ports = []
+            ip, _ = socket.getpeername()
 
-            # Initiate id counter of locally connected VM
-            if dpid not in self.dpid_to_id:
-                zk_path_dp = os.path.join(i_conf.DPID_TO_ID, dpid)
-                self.zk.ensure_path(zk_path_dp)
-                self.dpid_to_topid[dpid] = 1
-
-            # Update {dpid => switch_vmac}
-            if dpid not in self.dpid_to_vmac:
-                # New connection. Update both zookeeper and local cache
-                dcenter_vmac = i_util.create_dc_vmac(int(self.dcenter))
-                switch_vmac = i_util.create_swc_vmac(dcenter_vmac,
-                                                     self.switch_count)
-                self.dpid_to_vmac[dpid] = switch_vmac
-                zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
-                self.zk.create(zk_path_pfx, switch_vmac)
-            else:
-                switch_vmac = self.dpid_to_vmac[dpid]
-
-            # Update {dpid => ip}
-            self.dpid_to_ip[dpid] = ip
-            self.ip_to_dpid[ip] = dpid
-            LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, ip)
-
-            # Collect port information.  Sift out ports connecting peer
-            # switches and store them
-            for port in event.ports:
-                # TODO(changbl): Use OVSDB. Parse the port name to get
-                # the IP address of remote host to which the bridge
-                # builds a tunnel (GRE/VXLAN). E.g., obr1_184-53 =>
-                # CONF.ip_prefix.184.53. Only store the port
-                # connecting remote host.
-                port_no = str(port.port_no)
-                # TODO(chen): Define functions in inception_util
-                # to hide name processing
-                # TODO(chen): Port name should be used
-                # as a well-defined index.
-
-                # TODO(chen): Clean up logic here
-                if port.name.startswith('obr') and '_' in port.name:
-                    _, ip_suffix = port.name.split('_')
-                    ip_suffix = ip_suffix.replace('-', '.')
-                    peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
-                    self.dpid_to_conns[dpid][peer_ip] = port_no
-                    LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
-                                dpid, peer_ip, port_no)
-                    peer_dpid = self.ip_to_dpid.get(peer_ip)
-
-                    # Install switch-to-switch flow
-                    if peer_dpid is not None:
-                        peer_vmac = self.dpid_to_vmac[peer_dpid]
-                        peer_fwd_port = self.dpid_to_conns[peer_dpid][ip]
-                        swc_mask = i_conf.SWITCH_MASK
-
-                        self.set_nonlocal_flow(dpid, peer_vmac, swc_mask,
-                                               port_no, txn)
-                        self.set_nonlocal_flow(peer_dpid, switch_vmac,
-                                               swc_mask, peer_fwd_port, txn)
-
-                elif port.name == 'eth_dhcpp':
-                    LOGGER.info("DHCP server is found!")
-                    self.inception_dhcp.update_server(dpid, port_no)
-
-                elif port.name.startswith('gate'):
-                    if self.gateway is None:
-                        self.gateway = dpid
-
-                    _, dcenter = i_util.str_to_tuple(port.name, '_')
-                    remote_ip = self.dcenter_to_info[dcenter]
-                    self.dpid_to_conns[dpid][remote_ip] = port_no
-                    LOGGER.info("Inter-datacenter connection:"
-                                "(switch=%s, peer_ip=%s) -> (port=%s)",
-                                dpid, peer_ip, port_no)
-                    non_mesh_ports.append(port_no)
-
-                    # Install gateway-to-remote-gateway flow
-                    peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                    self.set_nonlocal_flow(dpid, peer_dc_vmac,
-                                           i_conf.DCENTER_MASK, port_no, txn)
-
-                else:
-                    # Store the port connecting local guests
-                    non_mesh_ports.append(port_no)
-
-            # Set up one flow for ARP messages
-            # Intercepts all ARP packets and send them to the controller
-            actions_arp = [ofproto_parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER)]
-            instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_arp)]
-            match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
-            self.set_flow(datapth=datapath,
-                          match=match_arp,
-                          priority=i_priority.ARP,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_arp)
-
-            # Set up two flows for DHCP messages
-            actions_dhcp = [ofproto_parser.OFPActionOutput(
-                ofproto.OFPP_CONTROLLER,
-                ofproto.OFPCML_NO_BUFFER)]
-            instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_dhcp)]
-            match_client = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
-                                                   ip_proto=inet.IPPROTO_UDP,
-                                                   udp_src=i_dhcp.CLIENT_PORT)
-            match_server = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
-                                                   ip_proto=inet.IPPROTO_UDP,
-                                                   udp_src=i_dhcp.SERVER_PORT)
-            # (1) Intercept all DHCP request packets and send to the controller
-            self.set_flow(datapath=datapath,
-                          match=match_client,
-                          priority=i_priority.DHCP,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_dhcp)
-            # (2) Intercept all DHCP reply packets and send to the controller
-            self.set_flow(datapath=datapath,
-                          match=match_server,
-                          priority=i_priority.DHCP,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_dhcp)
-
-            # Set up two parts of flows for broadcast messages
-            # (1) Broadcast messages from each non-mesh port: forward to all
-            # (other) ports
-            for port_no in non_mesh_ports:
-                actions_bcast_out = [
-                    ofproto_parser.OFPActionOutput(
-                        ofproto.OFPP_ALL)]
-                instructions_bcast_out = [
-                    datapath.ofproto_parser.OFPInstructionActions(
-                        ofproto.OFPIT_APPLY_ACTIONS,
-                        actions_bcast_out)]
-                match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
-                                                    eth_dst=mac.BROADCAST_STR),
-                self.set_flow(datapath=datapath,
-                              match=match_out,
-                              priority=i_priority.HOST_BCAST,
-                              flags=ofproto.OFPFF_SEND_FLOW_REM,
-                              command=ofproto.OFPFC_ADD,
-                              instructions=instructions_bcast_out)
-            # (2) Broadcast messages from each (tunnel) port: forward
-            # to all local ports. Since i_priority.SWITCH_BCAST <
-            # i_priority.HOST_BCAST, this guarantees that only
-            # tunnel-port message will trigger this flow
-            actions_bcast_in = [
-                ofproto_parser.OFPActionOutput(port=int(port_no))
-                for port_no in non_mesh_ports]
-            instruction_bcast_in = [
-                ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_bcast_in)]
-            match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
-            self.set_flow(datapath=datapath,
-                          match=match_in,
-                          priority=i_priority.SWITCH_BCAST,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_bcast_in)
-
-            # To prevent loop, all non-matching packets are dropped
-            instruction_norm = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    [])]
-            match_norm = ofproto_parser.OFPMatch()
-            self.set_flow(datapth=datapath,
-                          match=match_norm,
-                          priority=i_priority.NORMAL,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_norm)
-
-            # Handle dpid_waitinglist: install dpid-to-remote-datacenter flow
+            switch_vmac = self.register_switch(dpid, ip)
+            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports)
+            self.set_default_flows(datapath, local_ports)
             if dpid == self.gateway:
-                for dcenter in self.dcenter_to_info:
-                    peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                    for dpid_pending in self.gateway_waitinglist:
-                        gw_fwd_port = self.dpid_to_conns[dpid_pending][ip]
-                        self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
-                                               i_conf.DCENTER_MASK,
-                                               gw_fwd_port, txn)
-
-            # Switchs connected after gateway: set up flows towards
-            # remote datacenters through gateway
-            if self.gateway is not None:
-                if dpid != self.gateway:
-                    for dcenter in self.dcenter_to_info:
-                        peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                        gw_ip = self.dpid_to_ip[self.gateway]
-                        gw_fwd_port = self.dpid_to_conns[dpid][gw_ip]
-                        self.set_nonlocal_flow(dpid, peer_dc_vmac,
-                                               i_conf.DCENTER_MASK,
-                                               gw_fwd_port, txn)
-            else:
-                # The gateway switch has not connected
-                self.gateway_waitinglist.append(dpid)
-
-            # Do failover
-            if self.switch_count == CONF.num_switches:
-                # TODO(chen): Failover with rpc
-                # TODO(chen): Allow multiple logs
-                self._do_failover()
+                self.handle_waitinglist(ip, txn)
+            self.set_dcenter_flows(dpid, txn)
+            self.do_failover()
 
         # A switch disconnects
         else:
@@ -405,6 +206,236 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Del: (switch=%s) mac_to_position", dpid)
 
         txn.commit()
+
+    def register_switch(self, dpid, switch_ip):
+        """Store necessary info of a newly connected switch"""
+
+        # Initiate id counter of locally connected VM
+        if dpid not in self.dpid_to_id:
+            zk_path_dp = os.path.join(i_conf.DPID_TO_ID, dpid)
+            self.zk.ensure_path(zk_path_dp)
+            self.dpid_to_topid[dpid] = 1
+
+        # Update {dpid => switch_vmac}
+        if dpid not in self.dpid_to_vmac:
+            # New connection. Update both zookeeper and local cache
+            dcenter_vmac = i_util.create_dc_vmac(int(self.dcenter))
+            switch_vmac = i_util.create_swc_vmac(dcenter_vmac,
+                                                 self.switch_count)
+            self.dpid_to_vmac[dpid] = switch_vmac
+            zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
+            self.zk.create(zk_path_pfx, switch_vmac)
+        else:
+            switch_vmac = self.dpid_to_vmac[dpid]
+
+        # Update {dpid => ip}
+        self.dpid_to_ip[dpid] = switch_ip
+        self.ip_to_dpid[switch_ip] = dpid
+        LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, switch_ip)
+
+        return switch_vmac
+
+    def handle_waitinglist(self, switch_ip, txn):
+        # Handle dpid_waitinglist: install dpid-to-remote-datacenter flow
+        for dcenter in self.dcenter_to_info:
+            peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
+            for dpid_pending in self.gateway_waitinglist:
+                gw_fwd_port = self.dpid_to_conns[dpid_pending][switch_ip]
+                self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
+                                       i_conf.DCENTER_MASK,
+                                       gw_fwd_port, txn)
+
+    def set_dcenter_flows(self, dpid, txn):
+        # Switchs connected after gateway: set up flows towards
+        # remote datacenters through gateway
+        if self.gateway is not None:
+            if dpid != self.gateway:
+                for dcenter in self.dcenter_to_info:
+                    peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
+                    gw_ip = self.dpid_to_ip[self.gateway]
+                    gw_fwd_port = self.dpid_to_conns[dpid][gw_ip]
+                    self.set_nonlocal_flow(dpid, peer_dc_vmac,
+                                           i_conf.DCENTER_MASK,
+                                           gw_fwd_port, txn)
+        else:
+            # The gateway switch has not connected
+            self.gateway_waitinglist.append(dpid)
+
+    def parse_ports(self, dpid, switch_ip, switch_vmac, ports, txn):
+        """Collect port information.  Sift out ports connecting peer
+        switches and set up necessary flows
+
+        @return: list of ports connecting local guests
+        """
+
+        non_mesh_ports = []
+        for port in ports:
+            # TODO(changbl): Use OVSDB. Parse the port name to get
+            # the IP address of remote host to which the bridge
+            # builds a tunnel (GRE/VXLAN). E.g., obr1_184-53 =>
+            # CONF.ip_prefix.184.53. Only store the port
+            # connecting remote host.
+            port_no = str(port.port_no)
+            # TODO(chen): Define functions in inception_util
+            # to hide name processing
+            # TODO(chen): Port name should be used
+            # as a well-defined index.
+
+            # TODO(chen): Clean up logic here
+            if port.name.startswith('obr') and '_' in port.name:
+                _, ip_suffix = port.name.split('_')
+                ip_suffix = ip_suffix.replace('-', '.')
+                peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
+                self.dpid_to_conns[dpid][peer_ip] = port_no
+                LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
+                            dpid, peer_ip, port_no)
+                peer_dpid = self.ip_to_dpid.get(peer_ip)
+
+                # Install switch-to-switch flow
+                if peer_dpid is not None:
+                    peer_vmac = self.dpid_to_vmac[peer_dpid]
+                    peer_fwd_port = self.dpid_to_conns[peer_dpid][switch_ip]
+                    swc_mask = i_conf.SWITCH_MASK
+
+                    self.set_nonlocal_flow(dpid, peer_vmac, swc_mask,
+                                           port_no, txn)
+                    self.set_nonlocal_flow(peer_dpid, switch_vmac,
+                                           swc_mask, peer_fwd_port, txn)
+
+            elif port.name == 'eth_dhcpp':
+                LOGGER.info("DHCP server is found!")
+                self.inception_dhcp.update_server(dpid, port_no)
+
+            elif port.name.startswith('gate'):
+                if self.gateway is None:
+                    self.gateway = dpid
+
+                _, dcenter = i_util.str_to_tuple(port.name, '_')
+                remote_ip = self.dcenter_to_info[dcenter]
+                self.dpid_to_conns[dpid][remote_ip] = port_no
+                LOGGER.info("Inter-datacenter connection:"
+                            "(switch=%s, peer_ip=%s) -> (port=%s)",
+                            dpid, peer_ip, port_no)
+                non_mesh_ports.append(port_no)
+
+                # Install gateway-to-remote-gateway flow
+                peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
+                self.set_nonlocal_flow(dpid, peer_dc_vmac,
+                                       i_conf.DCENTER_MASK, port_no, txn)
+
+            else:
+                # Store the port connecting local guests
+                non_mesh_ports.append(port_no)
+
+        return non_mesh_ports
+
+    def do_failover(self):
+        # Do failover
+        if self.switch_count == CONF.num_switches:
+            # TODO(chen): Failover with rpc
+            # TODO(chen): Allow multiple logs
+            self._do_failover()
+
+    def set_default_flows(self, datapath, non_mesh_ports):
+        """Set up default flows on a connected switch"""
+
+        # Set up one flow for ARP messages.
+        # Intercepts all ARP packets and send them to the controller
+        ofproto = datapath.ofproto
+        ofproto_parser = datapath.ofproto_parser
+
+        actions_arp = [ofproto_parser.OFPActionOutput(
+            ofproto.OFPP_CONTROLLER,
+            ofproto.OFPCML_NO_BUFFER)]
+        instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS,
+            actions_arp)]
+        match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
+        self.set_flow(datapth=datapath,
+                      match=match_arp,
+                      priority=i_priority.ARP,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_arp)
+
+        # Set up two flows for DHCP messages
+        actions_dhcp = [ofproto_parser.OFPActionOutput(
+            ofproto.OFPP_CONTROLLER,
+            ofproto.OFPCML_NO_BUFFER)]
+        instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
+            ofproto.OFPIT_APPLY_ACTIONS,
+            actions_dhcp)]
+        match_client = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
+                                               ip_proto=inet.IPPROTO_UDP,
+                                               udp_src=i_dhcp.CLIENT_PORT)
+        match_server = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
+                                               ip_proto=inet.IPPROTO_UDP,
+                                               udp_src=i_dhcp.SERVER_PORT)
+        # (1) Intercept all DHCP request packets and send to the controller
+        self.set_flow(datapath=datapath,
+                      match=match_client,
+                      priority=i_priority.DHCP,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_dhcp)
+        # (2) Intercept all DHCP reply packets and send to the controller
+        self.set_flow(datapath=datapath,
+                      match=match_server,
+                      priority=i_priority.DHCP,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_dhcp)
+
+        # Set up two parts of flows for broadcast messages
+        # (1) Broadcast messages from each non-mesh port: forward to all
+        # (other) ports
+        for port_no in non_mesh_ports:
+            actions_bcast_out = [
+                ofproto_parser.OFPActionOutput(
+                    ofproto.OFPP_ALL)]
+            instructions_bcast_out = [
+                datapath.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions_bcast_out)]
+            match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
+                                                eth_dst=mac.BROADCAST_STR),
+            self.set_flow(datapath=datapath,
+                          match=match_out,
+                          priority=i_priority.HOST_BCAST,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instructions_bcast_out)
+        # (2) Broadcast messages from each (tunnel) port: forward
+        # to all local ports. Since i_priority.SWITCH_BCAST <
+        # i_priority.HOST_BCAST, this guarantees that only
+        # tunnel-port message will trigger this flow
+        actions_bcast_in = [
+            ofproto_parser.OFPActionOutput(port=int(port_no))
+            for port_no in non_mesh_ports]
+        instruction_bcast_in = [
+            ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions_bcast_in)]
+        match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
+        self.set_flow(datapath=datapath,
+                      match=match_in,
+                      priority=i_priority.SWITCH_BCAST,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_bcast_in)
+
+        # To prevent loop, all non-matching packets are dropped
+        instruction_norm = [
+            datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                [])]
+        match_norm = ofproto_parser.OFPMatch()
+        self.set_flow(datapth=datapath,
+                      match=match_norm,
+                      priority=i_priority.NORMAL,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_norm)
 
     def _do_failover(self):
         """Check if any work is left by previous controller.
@@ -494,9 +525,9 @@ class Inception(app_manager.RyuApp):
 
     def set_flow(self, datapath, match, priority, flags, command,
                  instructions):
-        # Send OFPFlowMod instruction to datapath
-        parser = datapath.ofproto_parser
+        """Send OFPFlowMod instruction to datapath"""
 
+        parser = datapath.ofproto_parser
         datapath.send_msg(
             parser.OFPFlowMod(
                 datapath=datapath,
@@ -514,7 +545,6 @@ class Inception(app_manager.RyuApp):
             txn.set_data(zk_path, zk_data)
         else:
             txn.create(zk_path, zk_data)
-        # TODO(chen): Update remote position info in remote datacenter
         self.mac_to_position[mac] = (dcenter, dpid, port, vmac)
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s,"
                     "vmac=%s)", mac, dcenter, dpid, port, vmac)
