@@ -576,7 +576,9 @@ class Inception(app_manager.RyuApp):
             rpc_client_old.redirect_flow(dpid_old, vmac_old, vmac_new,
                                          self.dcenter)
 
-            # TODO(chen): send gratuitous ARP to all sending guests (optional)
+            # Set up flows at gateway to redirect flows bound for
+            # old vmac in dcenter_old
+            # send gratuitous ARP to all sending guests
             return
 
         if dpid_old != dpid_new:
@@ -601,7 +603,7 @@ class Inception(app_manager.RyuApp):
             self.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port, txn,
                                 False)
 
-            # TODO(chen): send gratuitous ARP to all sending guests (optional)
+            # send gratuitous ARP to all sending guests
             return
 
         if port_old != port_new:
@@ -614,6 +616,7 @@ class Inception(app_manager.RyuApp):
                                 False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
+            return
 
     def set_local_flow(self, dpid, vmac, mac, port, txn, flow_add=True):
         """Set up a microflow on a switch (dpid) towards a local host (mac)
@@ -638,7 +641,7 @@ class Inception(app_manager.RyuApp):
         match = ofproto_parser.OFPMatch(eth_dst=vmac)
         self.set_flow(datapth=datapath,
                       match=match,
-                      priority=i_priority.DATA_FWD,
+                      priority=i_priority.DATA_FWD_LOCAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=flow_cmd,
                       instructions=instructions)
@@ -652,8 +655,10 @@ class Inception(app_manager.RyuApp):
         """
         if mask == i_conf.DCENTER_MASK:
             mac_record = i_util.get_dc_prefix(mac)
+            priority = i_priority.DATA_FWD_DCENTER
         else:
             mac_record = i_util.get_swc_prefix(mac)
+            priority = i_priority.DATA_FWD_SWITCH
         if dpid in self.mac_to_flows[mac_record]:
             # Don't set up redundant flows
             return
@@ -675,7 +680,7 @@ class Inception(app_manager.RyuApp):
         match_src = ofproto_parser.OFPMatch(eth_dst=(mac, mask))
         self.set_flow(datapath=datapath,
                       match=match_src,
-                      priority=i_priority.DATA_FWD,
+                      priority=priority,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=flow_cmd,
                       instructions=instructions_src)
