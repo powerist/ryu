@@ -113,7 +113,12 @@ class Inception(app_manager.RyuApp):
         self.mac_to_position = {}
         self.dpid_to_id = defaultdict(dict)
         self.mac_to_flows = defaultdict(dict)
+        # {vmac => {mac => time}}
+        # Record guests which queried vmac
+        # TODO(chen): Store data in Zookeeper?
+        self.vmac_to_queries = defaultdict(dict)
         self.ip_to_mac = {}
+        self.mac_to_ip = {}
 
         self.gateway = None
         self.dcenter = CONF.dcenter
@@ -172,7 +177,8 @@ class Inception(app_manager.RyuApp):
             ip, _ = socket.getpeername()
 
             switch_vmac = self.register_switch(dpid, ip)
-            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports)
+            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports,
+                                           txn)
             self.set_default_flows(datapath, local_ports)
             if dpid == self.gateway:
                 self.handle_waitinglist(ip, txn)
@@ -235,17 +241,18 @@ class Inception(app_manager.RyuApp):
 
         return switch_vmac
 
-    def handle_waitinglist(self, switch_ip, txn):
-        # Handle dpid_waitinglist: install dpid-to-remote-datacenter flow
+    def handle_waitinglist(self, gateway_ip, txn):
+        """Handle dpid_waitinglist: install dpid-to-remote-datacenter flow"""
         for dcenter in self.dcenter_to_info:
             peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
             for dpid_pending in self.gateway_waitinglist:
-                gw_fwd_port = self.dpid_to_conns[dpid_pending][switch_ip]
+                gw_fwd_port = self.dpid_to_conns[dpid_pending][gateway_ip]
                 self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
                                        i_conf.DCENTER_MASK,
                                        gw_fwd_port, txn)
 
     def set_dcenter_flows(self, dpid, txn):
+        """Set up flows to other datacenters"""
         # Switchs connected after gateway: set up flows towards
         # remote datacenters through gateway
         if self.gateway is not None:
@@ -311,11 +318,11 @@ class Inception(app_manager.RyuApp):
                     self.gateway = dpid
 
                 _, dcenter = i_util.str_to_tuple(port.name, '_')
-                remote_ip = self.dcenter_to_info[dcenter]
-                self.dpid_to_conns[dpid][remote_ip] = port_no
+                _, remote_gw_ip = self.dcenter_to_info[dcenter]
+                self.dpid_to_conns[dpid][remote_gw_ip] = port_no
                 LOGGER.info("Inter-datacenter connection:"
                             "(switch=%s, peer_ip=%s) -> (port=%s)",
-                            dpid, peer_ip, port_no)
+                            dpid, remote_gw_ip, port_no)
                 non_mesh_ports.append(port_no)
 
                 # Install gateway-to-remote-gateway flow
@@ -330,7 +337,7 @@ class Inception(app_manager.RyuApp):
         return non_mesh_ports
 
     def do_failover(self):
-        # Do failover
+        """Do failover"""
         if self.switch_count == CONF.num_switches:
             # TODO(chen): Failover with rpc
             # TODO(chen): Allow multiple logs
@@ -351,7 +358,7 @@ class Inception(app_manager.RyuApp):
             ofproto.OFPIT_APPLY_ACTIONS,
             actions_arp)]
         match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
-        self.set_flow(datapth=datapath,
+        self.set_flow(datapath=datapath,
                       match=match_arp,
                       priority=i_priority.ARP,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
@@ -389,16 +396,14 @@ class Inception(app_manager.RyuApp):
         # Set up two parts of flows for broadcast messages
         # (1) Broadcast messages from each non-mesh port: forward to all
         # (other) ports
+        actions_bcast_out = [ofproto_parser.OFPActionOutput(ofproto.OFPP_ALL)]
+        instructions_bcast_out = [
+            datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions_bcast_out)]
         for port_no in non_mesh_ports:
-            actions_bcast_out = [
-                ofproto_parser.OFPActionOutput(
-                    ofproto.OFPP_ALL)]
-            instructions_bcast_out = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_bcast_out)]
             match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
-                                                eth_dst=mac.BROADCAST_STR),
+                                                eth_dst=mac.BROADCAST_STR)
             self.set_flow(datapath=datapath,
                           match=match_out,
                           priority=i_priority.HOST_BCAST,
@@ -430,7 +435,7 @@ class Inception(app_manager.RyuApp):
                 ofproto.OFPIT_APPLY_ACTIONS,
                 [])]
         match_norm = ofproto_parser.OFPMatch()
-        self.set_flow(datapth=datapath,
+        self.set_flow(datapath=datapath,
                       match=match_norm,
                       priority=i_priority.NORMAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
@@ -573,12 +578,33 @@ class Inception(app_manager.RyuApp):
 
             # Instruct dpid_old in dcenter_old to redirect traffic
             rpc_client_old = self.dcenter_to_rpc[dcenter_old]
-            rpc_client_old.redirect_flow(dpid_old, vmac_old, vmac_new,
-                                         self.dcenter)
+            rpc_client_old.redirect_local_flow(dpid_old, vmac_old, vmac_new,
+                                               self.dcenter)
 
             # Set up flows at gateway to redirect flows bound for
-            # old vmac in dcenter_old
-            # send gratuitous ARP to all sending guests
+            # old vmac in dcenter_old to new vmac
+            ip_new = self.dpid_to_ip[dpid_new]
+            gw_fwd_port = self.dpid_to_conns[self.gateway][ip_new]
+            # TODO(chen): When to delete it?
+            self.set_local_flow(self.gateway, vmac_old, vmac_new, gw_fwd_port,
+                                txn)
+            # Redirect gateway flows in peer datacenters towards vmac_old
+            # TODO(chen): When to delete it?
+            for dcenter in self.dcenter_to_info:
+                rpc_client = self.dcenter_to_rpc[dcenter]
+                rpc_client.set_gateway_flow(vmac_old, vmac_new,
+                                            self.dcenter)
+                # Instruct other controllers to send gratuitous ARP
+                rpc_client.send_arp_update(mac, vmac_old, vmac_new)
+
+            # send gratuitous ARP to all local sending guests
+            # TODO(chen): Only within ARP entry timeout
+            for mac_query in self.vmac_to_queries[vmac_old]:
+                ip = self.mac_to_ip[mac]
+                ip_query = self.mac_to_ip[mac_query]
+                self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
+                                                  mac_query)
+            del self.vmac_to_queries[vmac_old]
             return
 
         if dpid_old != dpid_new:
@@ -619,9 +645,10 @@ class Inception(app_manager.RyuApp):
             return
 
     def set_local_flow(self, dpid, vmac, mac, port, txn, flow_add=True):
-        """Set up a microflow on a switch (dpid) towards a local host (mac)
+        """Set up a microflow on a switch (dpid) towards a guest (mac)
         The rule matches on dst vmac, rewrites it to mac and forwards to
         the appropriate port.
+        mac can be another vmac.
         """
         datapath = self.dpset.get(str_to_dpid(dpid))
         ofproto = datapath.ofproto
@@ -639,7 +666,7 @@ class Inception(app_manager.RyuApp):
                 ofproto.OFPIT_APPLY_ACTIONS,
                 actions)]
         match = ofproto_parser.OFPMatch(eth_dst=vmac)
-        self.set_flow(datapth=datapath,
+        self.set_flow(datapath=datapath,
                       match=match,
                       priority=i_priority.DATA_FWD_LOCAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
