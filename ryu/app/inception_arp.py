@@ -17,6 +17,7 @@
 
 import logging
 import os
+import time
 
 from ryu.app import inception_conf as i_conf
 from ryu.lib import mac
@@ -40,10 +41,12 @@ class InceptionArp(object):
         self.dpset = inception.dpset
         self.dcenter = inception.dcenter
         self.ip_to_mac = inception.ip_to_mac
+        self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
         self.dpid_to_vmac = inception.dpid_to_vmac
         self.mac_to_position = inception.mac_to_position
         self.dcenter_to_rpc = inception.dcenter_to_rpc
+        self.vmac_to_queries = inception.vmac_to_queries
 
     def handle(self, dpid, in_port, arp_header, txn):
         LOGGER.info("Handle ARP packet")
@@ -59,7 +62,7 @@ class InceptionArp(object):
 
     def _do_arp_learning(self, arp_header, txn):
         """Learn IP => MAC mapping from a received ARP packet, update
-        ip_to_mac table.
+        ip_to_mac and mac_to_ip table.
         """
         # ERROR: dst_mac unparsable from arp_header
         src_ip = arp_header.src_ip
@@ -77,6 +80,7 @@ class InceptionArp(object):
         else:
             txn.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
+        self.mac_to_ip[mac] = ip
         LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)", ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
@@ -133,12 +137,12 @@ class InceptionArp(object):
         eth_packet = ethernet.ethernet(ethertype=ether.ETH_TYPE_ARP,
                                         src=src_mac,
                                         dst=dst_mac)
-        packet = packet.Packet()
-        packet.add_protocol(eth_packet)
-        packet.add_protocol(arp_packet)
-        packet.serialize()
+        packet_out = packet.Packet()
+        packet_out.add_protocol(eth_packet)
+        packet_out.add_protocol(arp_packet)
+        packet_out.serialize()
 
-        return packet
+        return packet_out
 
     def _handle_arp_request(self, dpid, in_port, arp_header, txn):
         """Process ARP request packet."""
@@ -148,20 +152,28 @@ class InceptionArp(object):
         dst_ip = arp_header.dst_ip
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
-        # If entry not found, broadcast request
+        _, _, _, src_vmac = self.mac_to_position[src_mac]
         if dst_ip not in self.ip_to_mac:
-            self.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
+            # If entry not found, broadcast request
+            self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
             for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
+                rpc_client.broadcast_arp_request(src_ip, src_vmac,
+                                                 dst_ip, dpid)
         else:
             dst_mac = self.ip_to_mac[arp_header.dst_ip]
-            _, _, _, vmac = self.mac_to_position[dst_mac]
+            dst_dcenter, _, _, dst_vmac = self.mac_to_position[dst_mac]
 
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
-                        dst_ip, dst_mac, vmac)
+                        dst_ip, dst_mac, dst_vmac)
+
+            # Record the communicating guests and time
+            timestamp = time.time()
+            self.vmac_to_queries[dst_vmac][src_mac] = timestamp
+            if dst_dcenter == self.dcenter:
+                self.vmac_to_queries[src_vmac][dst_mac] = timestamp
 
             # Send arp reply
-            src_mac_reply = vmac
+            src_mac_reply = dst_vmac
             vmac_reply = src_mac
             src_ip_reply = dst_ip
             dst_ip_reply = src_ip
@@ -199,14 +211,20 @@ class InceptionArp(object):
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
         dst_ip = arp_header.dst_ip
-        dst_mac = arp_header.dst_mac
+        dst_vmac = arp_header.dst_mac
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
+        dst_mac = self.ip_to_mac[dst_ip]
         dst_dcenter, _, _, _ = self.mac_to_position[dst_mac]
         _, _, _, src_vmac = self.mac_to_position[src_mac]
 
+        # Record the communicating guests and time
+        timestamp = time.time()
+        self.vmac_to_queries[dst_vmac][src_mac] = timestamp
+
         if dst_dcenter == self.dcenter:
+            self.vmac_to_queries[src_vmac][dst_mac] = timestamp
             # An arp reply towards a local server
             self.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
 
