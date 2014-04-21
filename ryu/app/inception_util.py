@@ -14,6 +14,11 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import logging
+
+from ryu.app import inception_conf as i_conf
+
+LOGGER = logging.getLogger(__name__)
 
 """Inception utilities"""
 
@@ -43,11 +48,17 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     return peer_dcs_dic
 
 
-def generate_vm_id(last_id, bound=65535):
+def generate_vm_id(vm_mac, dpid, conflict_record):
     """Generate a new vm_id,
     00 is saved for switch"""
-    #TODO(chen): Avoid id conflict
-    return ((last_id + 1) % 65534 + 1)
+    #TODO(chen): Avoid hash conflict
+    vm_id = (hash(vm_mac) % i_conf.VM_MAXID + 1)
+    if conflict_record[dpid][vm_id]:
+        LOGGER.info("ERROR: switch id conflict: ", vm_id)
+    else:
+        conflict_record[dpid][vm_id] = True
+
+    return vm_id
 
 
 # TODO(chen): Class VMAC
@@ -66,7 +77,7 @@ def create_dc_vmac(dcenter):
     return dcenter_vmac
 
 
-def create_swc_vmac(dcenter_vmac, switch_num):
+def create_swc_vmac(dcenter_vmac, dpid, conflict_record):
     """Generate MAC address prefix for switch based on
     datacenter id and switch id.
 
@@ -74,11 +85,13 @@ def create_swc_vmac(dcenter_vmac, switch_num):
     xx:xx is converted from data center id
     yy:yy is converted from switch id
     """
-    if switch_num > 65535:
-        # Invalid numbers
-        return
-
     dcenter_prefix = get_dc_prefix(dcenter_vmac)
+
+    switch_num = (hash(dpid) % i_conf.SWITCH_MAXID) + 1
+    if conflict_record[switch_num]:
+        LOGGER.info("ERROR: switch id conflict: ", switch_num)
+    else:
+        conflict_record[switch_num] = True
 
     switch_high = (switch_num >> 8) & 0xff
     switch_low = switch_num & 0xff

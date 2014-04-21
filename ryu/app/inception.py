@@ -98,31 +98,35 @@ class Inception(app_manager.RyuApp):
         # mixed. Try to hide the IPs and only present connections between
         # DPIDs.
         self.zk.ensure_path(i_conf.MAC_TO_POSITION)
-        self.zk.ensure_path(i_conf.DPID_TO_ID)
-        self.zk.ensure_path(i_conf.MAC_TO_FLOWS)
         self.zk.ensure_path(i_conf.IP_TO_MAC)
         self.zk.ensure_path(i_conf.DPID_TO_VMAC)
         # TODO(chen): gateways have to be stored pairwise
         # if each datacenter has more than one gateways
 
         # local in-memory caches of network data
+        # TODO(chen): A better way to replace twin dictionaries?
         self.dpid_to_ip = {}
         self.ip_to_dpid = {}
 
         self.dpid_to_conns = defaultdict(dict)
         self.mac_to_position = {}
-        self.dpid_to_id = defaultdict(dict)
-        self.mac_to_flows = defaultdict(dict)
         # {vmac => {mac => time}}
         # Record guests which queried vmac
-        # TODO(chen): Store data in Zookeeper?
+        # TODO(chen): Store data in Zookeeper
         self.vmac_to_queries = defaultdict(dict)
         self.ip_to_mac = {}
         self.mac_to_ip = {}
 
         self.gateway = None
         self.dcenter = CONF.dcenter
+        # TODO(chen): Store the following two into zookeeper
+        # Record switch id assignment
+        self.switch_id_slots = [False] * (i_conf.SWITCH_MAXID + 1)
+        # Record vm id assignment of each switch
+        self.vm_id_slots = {}
+
         self.switch_count = 0
+        self.switch_maxid = 0
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
         peer_dcenters = CONF.peer_dcenters
         self.dcenter_to_info = i_util.parse_peer_dcenters(peer_dcenters)
@@ -143,6 +147,7 @@ class Inception(app_manager.RyuApp):
         self.inception_rpc = i_rpc.InceptionRpc(self)
 
         self.setup_rpc()
+        self.initiate_cache()
 
     def setup_rpc(self):
         """Set up RPC server and RPC client to other controllers"""
@@ -163,6 +168,28 @@ class Inception(app_manager.RyuApp):
                                           (controller_ip, CONF.rpc_port))
             self.dcenter_to_rpc[dcenter] = rpc_client
 
+    def initiate_cache(self):
+        """Pull network data from Zookeeper during controller boot up"""
+        self.pull_data(i_conf.MAC_TO_POSITION, self.mac_to_position)
+        self.pull_data(i_conf.IP_TO_MAC, self.ip_to_mac)
+        self.pull_data(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
+
+        # Copy data to twin data structure
+        for (ip, mac) in self.ip_to_mac.items():
+            self.mac_to_ip[mac] = ip
+
+    def pull_data(self, zk_path, local_dic):
+        """Copy all data under zk_path in Zookeeper into local cache"""
+        for znode_unicode in self.zk.get_children(zk_path):
+            znode = znode_unicode.encode('Latin-1')
+            sub_path = os.path.join(zk_path, znode)
+            zk_data, _ = self.zk.get(sub_path)
+            if zk_path == i_conf.MAC_TO_POSITION:
+                zk_data_dic = i_util.str_to_tuple(zk_data)
+            else:
+                zk_data_dic = zk_data
+            local_dic[znode] = zk_data_dic
+
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
         """Handle when a switch event is received."""
@@ -175,6 +202,9 @@ class Inception(app_manager.RyuApp):
             self.switch_count += 1
             socket = datapath.socket
             ip, _ = socket.getpeername()
+
+            if dpid not in self.vm_id_slots:
+                self.vm_id_slots[dpid] = [False] * (i_conf.VM_MAXID + 1)
 
             switch_vmac = self.register_switch(dpid, ip)
             local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports,
@@ -201,7 +231,7 @@ class Inception(app_manager.RyuApp):
 
             # Delete all connected guests
             for mac_addr in self.mac_to_position.keys():
-                _, local_dpid, _ = self.mac_to_position[mac_addr]
+                _, local_dpid, _, _ = self.mac_to_position[mac_addr]
                 if local_dpid == dpid:
                     del self.mac_to_position[mac_addr]
                 zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac_addr)
@@ -215,19 +245,12 @@ class Inception(app_manager.RyuApp):
 
     def register_switch(self, dpid, switch_ip):
         """Store necessary info of a newly connected switch"""
-
-        # Initiate id counter of locally connected VM
-        if dpid not in self.dpid_to_id:
-            zk_path_dp = os.path.join(i_conf.DPID_TO_ID, dpid)
-            self.zk.ensure_path(zk_path_dp)
-            self.dpid_to_topid[dpid] = 1
-
         # Update {dpid => switch_vmac}
         if dpid not in self.dpid_to_vmac:
             # New connection. Update both zookeeper and local cache
             dcenter_vmac = i_util.create_dc_vmac(int(self.dcenter))
-            switch_vmac = i_util.create_swc_vmac(dcenter_vmac,
-                                                 self.switch_count)
+            switch_vmac = i_util.create_swc_vmac(dcenter_vmac, dpid,
+                                                 self.switch_id_slots)
             self.dpid_to_vmac[dpid] = switch_vmac
             zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
             self.zk.create(zk_path_pfx, switch_vmac)
@@ -340,8 +363,30 @@ class Inception(app_manager.RyuApp):
         """Do failover"""
         if self.switch_count == CONF.num_switches:
             # TODO(chen): Failover with rpc
-            # TODO(chen): Allow multiple logs
             self._do_failover()
+
+    def _do_failover(self):
+        """Check if any work is left by previous controller.
+        If so, continue the unfinished work.
+        """
+        failover_node = self.zk.get_children(CONF.zk_failover)
+        for znode_unicode in failover_node:
+            znode = znode_unicode.encode('Latin-1')
+            log_path = os.path.join(CONF.zk_failover, znode)
+            data, _ = self.zk.get(log_path)
+            data_tuple = i_util.str_to_tuple(data)
+
+            if znode == i_conf.MIGRATION:
+                self.handle_migration(*data_tuple)
+                self.delete_failover_log(i_conf.MIGRATION)
+
+            if znode == i_conf.RPC_GATEWAY_FLOW:
+                self.inception_rpc.set_gateway_flow(*data_tuple)
+                self.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+
+            if znode == i_conf.RPC_REDIRECT_FLOW:
+                self.inception_rpc.redirect_local_flow(*data_tuple)
+                self.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
 
     def set_default_flows(self, datapath, non_mesh_ports):
         """Set up default flows on a connected switch"""
@@ -442,22 +487,6 @@ class Inception(app_manager.RyuApp):
                       command=ofproto.OFPFC_ADD,
                       instructions=instruction_norm)
 
-    def _do_failover(self):
-        """Check if any work is left by previous controller.
-        If so, continue the unfinished work.
-        """
-        # TODO(chen): Failover for multi-datacenter arp
-        failover_node = self.zk.get_children(CONF.zk_failover)
-        for znode_unicode in failover_node:
-            znode = znode_unicode.encode('Latin-1')
-            log_path = os.path.join(CONF.zk_failover, znode)
-            data, _ = self.zk.get(log_path)
-            (dpid, in_port) = i_util.str_to_tuple(znode)
-            txn = self.zk.transaction()
-            self._process_packet_in(dpid, in_port, data, txn)
-            txn.delete(log_path)
-            txn.commit()
-
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
         """Handle when a packet is received."""
@@ -466,16 +495,11 @@ class Inception(app_manager.RyuApp):
         dpid = dpid_to_str(datapath.id)
         in_port = str(msg.match['in_port'])
 
-        # Failover logging
-        znode_name = i_util.tuple_to_str((dpid, in_port))
-        log_path = os.path.join(CONF.zk_failover, znode_name)
-        # TODO: several log_path possible with multithread
-        # TODO(chen): Uncomment the following line
-        # self.zk.create(log_path, msg.data)
-
+        # TODO(chen): Now we assume VMs are registered during DHCP and
+        # gratuitous ARP during boot-up. Transaction is not needed.
+        # No need to transaction during VM live migration
         txn = self.zk.transaction()
         self._process_packet_in(dpid, in_port, msg.data, txn)
-        txn.delete(log_path)
         txn.commit()
 
     def _process_packet_in(self, dpid, in_port, data, txn):
@@ -507,7 +531,7 @@ class Inception(app_manager.RyuApp):
         forwarding broadcast message.
         """
         if ethernet_src not in self.mac_to_position:
-            vm_id = i_util.generate_vm_id(self.dpid_to_topid[dpid])
+            vm_id = i_util.generate_vm_id(ethernet_src, dpid, self.vm_id_slots)
             switch_vmac = self.dpid_to_vmac[dpid]
             vmac = i_util.create_vm_vmac(switch_vmac, vm_id)
             self.update_position(ethernet_src, self.dcenter, dpid, in_port,
@@ -515,7 +539,7 @@ class Inception(app_manager.RyuApp):
             for rpc_client in self.dcenter_to_rpc.values():
                 rpc_client.update_position(ethernet_src, self.dcenter, dpid,
                                            in_port, vmac)
-            self.set_local_flow(dpid, vmac, ethernet_src, in_port, txn)
+            self.set_local_flow(dpid, vmac, ethernet_src, in_port)
         else:
             position = self.mac_to_position[ethernet_src]
             dcenter_old, dpid_old, port_old, vmac = position
@@ -525,8 +549,23 @@ class Inception(app_manager.RyuApp):
                 # No migration
                 return False
 
+            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
+                         dpid, in_port)
+            self.create_failover_log(i_conf.MIGRATION, log_tuple)
             self.handle_migration(ethernet_src, dcenter_old, dpid_old,
-                                  port_old, vmac, dpid, in_port, txn)
+                                  port_old, vmac, dpid, in_port)
+            self.delete_failover_log(i_conf.MIGRATION)
+
+    def create_failover_log(self, log_type, data_tuple):
+        # Failover logging
+        log_data = i_util.tuple_to_str(data_tuple)
+        log_path = os.path.join(CONF.zk_failover, log_type)
+        self.zk.create(log_path, log_data)
+
+    def delete_failover_log(self, log_type):
+        # Delete failover logging
+        log_path = os.path.join(CONF.zk_failover, log_type)
+        self.zk.delete(log_path)
 
     def set_flow(self, datapath, match, priority, flags, command,
                  instructions):
@@ -542,60 +581,80 @@ class Inception(app_manager.RyuApp):
                 command=command,
                 instructions=instructions))
 
-    def update_position(self, mac, dcenter, dpid, port, vmac, txn):
+    def update_position(self, mac, dcenter, dpid, port, vmac, txn=None):
         """Update guest MAC and its connected switch"""
+        data_tuple = (dcenter, dpid, port, vmac)
+        if mac in self.mac_to_position:
+            record = self.mac_to_position[mac]
+            if record == data_tuple:
+                return
+
         zk_data = i_util.tuple_to_str((dcenter, dpid, port, vmac))
         zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
+        # TODO(chen): Get rid of too much if-else here
         if mac in self.mac_to_position:
-            txn.set_data(zk_path, zk_data)
+            if txn is not None:
+                txn.set_data(zk_path, zk_data)
+            else:
+                self.zk.set(zk_path, zk_data)
         else:
-            txn.create(zk_path, zk_data)
+            if txn is not None:
+                txn.create(zk_path, zk_data)
+            else:
+                self.zk.create(zk_path, zk_data)
         self.mac_to_position[mac] = (dcenter, dpid, port, vmac)
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s,"
                     "vmac=%s)", mac, dcenter, dpid, port, vmac)
 
     def handle_migration(self, mac, dcenter_old, dpid_old, port_old, vmac_old,
-                         dpid_new, port_new, txn):
+                         dpid_new, port_new):
         """Set flows to handle VM migration properly"""
         LOGGER.info("Handle VM migration")
 
         if dcenter_old != self.dcenter:
             # Multi-datacenter migration
             # Install/Update a new flow at dpid_new towards mac.
-            switch_vmac = self.dpid_to_vmac[dpid_new]
-            # TODO(Chen): Increase top id
-            vm_id = i_util.generate_vm_id(self.dpid_to_topid[dpid_new])
-            vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+            _, _, _, vmac_record = self.mac_to_position[mac]
+            if vmac_record == vmac_old:
+                # A new vmac has not been created
+                switch_vmac = self.dpid_to_vmac[dpid_new]
+                # TODO(Chen): Increase top id
+                vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
+                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+            else:
+                # The previous controller crashes after creating vmac_new
+                vmac_new = vmac_record
 
+            # Store vmac_new
             self.update_position(mac, self.dcenter, dpid_new, port_new,
-                                 vmac_new, txn)
+                                 vmac_new)
             for rpc_client in self.dcenter_to_rpc.values():
                 rpc_client.update_position(mac, self.dcenter, dpid_new,
                                            port_new, vmac_new)
-            self.set_local_flow(dpid_new, vmac_new, mac, port_new, txn)
-            LOGGER.info("Add local forward flow on (switch=%s) towards "
-                        "(mac=%s)", dpid_new, mac)
-
             # Instruct dpid_old in dcenter_old to redirect traffic
             rpc_client_old = self.dcenter_to_rpc[dcenter_old]
-            rpc_client_old.redirect_local_flow(dpid_old, vmac_old, vmac_new,
-                                               self.dcenter)
+            rpc_client_old.redirect_local_flow(dpid_old, mac, vmac_old,
+                                               vmac_new, self.dcenter)
+
+            # Redirect gateway flows in peer datacenters towards vmac_old
+            # and instruct other controllers to send gratuitous ARP
+            # TODO(chen): When to delete it?
+            for dcenter in self.dcenter_to_info:
+                rpc_client = self.dcenter_to_rpc[dcenter]
+                rpc_client.set_gateway_flow(mac, vmac_old, vmac_new,
+                                            self.dcenter)
 
             # Set up flows at gateway to redirect flows bound for
             # old vmac in dcenter_old to new vmac
             ip_new = self.dpid_to_ip[dpid_new]
             gw_fwd_port = self.dpid_to_conns[self.gateway][ip_new]
             # TODO(chen): When to delete it?
-            self.set_local_flow(self.gateway, vmac_old, vmac_new, gw_fwd_port,
-                                txn)
-            # Redirect gateway flows in peer datacenters towards vmac_old
-            # TODO(chen): When to delete it?
-            for dcenter in self.dcenter_to_info:
-                rpc_client = self.dcenter_to_rpc[dcenter]
-                rpc_client.set_gateway_flow(vmac_old, vmac_new,
-                                            self.dcenter)
-                # Instruct other controllers to send gratuitous ARP
-                rpc_client.send_arp_update(mac, vmac_old, vmac_new)
+            self.set_local_flow(self.gateway, vmac_old, vmac_new, gw_fwd_port)
+
+            # Add flow at dpid_new towards vmac_new
+            self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            LOGGER.info("Add local forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_new, mac)
 
             # send gratuitous ARP to all local sending guests
             # TODO(chen): Only within ARP entry timeout
@@ -609,27 +668,40 @@ class Inception(app_manager.RyuApp):
 
         if dpid_old != dpid_new:
             # Same datacenter, different switch migration
-            # Install/Update a new flow at dpid_new towards mac.
-            switch_vmac = self.dpid_to_vmac[dpid_new]
-            vm_id = i_util.generate_vm_id(self.dpid_to_topid[dpid_new])
-            vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+            # Install/Update a new flow at dpid_new towards mac
+            _, _, _, vmac_record = self.mac_to_position[mac]
+            if vmac_record == vmac_old:
+                switch_vmac = self.dpid_to_vmac[dpid_new]
+                vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
+                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+            else:
+                # The previous controller crashes after creating vmac_new
+                vmac_new = vmac_record
 
+            # Store vmac_new
             self.update_position(mac, self.dcenter, dpid_new, port_new,
-                                 vmac_new, txn)
+                                 vmac_new)
             for rpc_client in self.dcenter_to_rpc.values():
                 rpc_client.update_position(mac, self.dcenter, dpid_new,
                                            port_new, vmac_new)
-            self.set_local_flow(dpid_new, vmac_new, mac, port_new, txn)
-            LOGGER.info("Add local forward flow on (switch=%s) towards "
-                        "(mac=%s)", dpid_new, mac)
-
             # Instruct dpid_old to redirect traffic
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]
-            self.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port, txn,
-                                False)
-
-            # send gratuitous ARP to all sending guests
+            self.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port, False)
+            LOGGER.info("Redirect forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_old, mac)
+            # Add flow at dpid_new towards vmac_new
+            self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            LOGGER.info("Add local forward flow on (switch=%s) towards "
+                        "(mac=%s)", dpid_new, mac)
+            # send gratuitous ARP to all local sending guests
+            # TODO(chen): Only within ARP entry timeout
+            for mac_query in self.vmac_to_queries[vmac_old]:
+                ip = self.mac_to_ip[mac]
+                ip_query = self.mac_to_ip[mac_query]
+                self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
+                                                  mac_query)
+            del self.vmac_to_queries[vmac_old]
             return
 
         if port_old != port_new:
@@ -638,13 +710,12 @@ class Inception(app_manager.RyuApp):
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]
 
-            self.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port, txn,
-                                False)
+            self.set_local_flow(dpid_old, vmac_old, mac, fwd_port, False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
             return
 
-    def set_local_flow(self, dpid, vmac, mac, port, txn, flow_add=True):
+    def set_local_flow(self, dpid, vmac, mac, port, flow_add=True):
         """Set up a microflow on a switch (dpid) towards a guest (mac)
         The rule matches on dst vmac, rewrites it to mac and forwards to
         the appropriate port.
@@ -686,9 +757,6 @@ class Inception(app_manager.RyuApp):
         else:
             mac_record = i_util.get_swc_prefix(mac)
             priority = i_priority.DATA_FWD_SWITCH
-        if dpid in self.mac_to_flows[mac_record]:
-            # Don't set up redundant flows
-            return
 
         datapath = self.dpset.get(str_to_dpid(dpid))
         ofproto = datapath.ofproto
@@ -711,11 +779,6 @@ class Inception(app_manager.RyuApp):
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=flow_cmd,
                       instructions=instructions_src)
-
-        if mac_record not in self.mac_to_flows:
-            txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac_record))
-        self.mac_to_flows[mac_record][dpid] = True
-        txn.create(os.path.join(i_conf.MAC_TO_FLOWS, mac_record, dpid))
 
         LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
                     dpid, mac_record)
