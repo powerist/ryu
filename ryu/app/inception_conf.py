@@ -101,5 +101,7 @@ VM_MAXID = 65535
 
 # Failover type
 MIGRATION = "migration"
+SOURCE_LEARNING = "source_learning"
+ARP_LEARNING = "arp_learning"
 RPC_REDIRECT_FLOW = "rpc_redirect_flow"
 RPC_GATEWAY_FLOW = "rpc_gateway_flow"

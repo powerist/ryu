@@ -34,15 +34,11 @@ class InceptionRpc(object):
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac):
         """Set up flows towards gateway switch"""
-        txn = self.zk.transaction()
-        self.inception.setup_inter_dcenter_flows(local_mac, remote_mac, txn)
-        txn.commit()
+        self.inception.setup_inter_dcenter_flows(local_mac, remote_mac)
 
     def update_arp_mapping(self, ip, mac, dcenter):
         """Update remote ip_mac mapping"""
-        txn = self.zk.transaction()
-        self.inception_arp.update_arp_mapping(ip, mac, dcenter, txn)
-        txn.commit()
+        self.inception_arp.update_arp_mapping(ip, mac, dcenter)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         self.inception_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)
@@ -51,9 +47,7 @@ class InceptionRpc(object):
         self.inception_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
 
     def update_position(self, mac, dcenter, dpid, port, vmac):
-        txn = self.zk.transaction()
-        self.inception.update_position(mac, dcenter, dpid, port, vmac, txn)
-        txn.commit()
+        self.inception.update_position(mac, dcenter, dpid, port, vmac)
 
     def redirect_local_flow(self, dpid_old, mac, vmac_old, vmac_new,
                             dcenter_new):
