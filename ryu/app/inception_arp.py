@@ -38,6 +38,7 @@ class InceptionArp(object):
         self.inception = inception
 
         # name shortcuts
+        self.zk = inception.zk
         self.dpset = inception.dpset
         self.dcenter = inception.dcenter
         self.ip_to_mac = inception.ip_to_mac
@@ -48,40 +49,47 @@ class InceptionArp(object):
         self.dcenter_to_rpc = inception.dcenter_to_rpc
         self.vmac_to_queries = inception.vmac_to_queries
 
-    def handle(self, dpid, in_port, arp_header, txn):
+    def handle(self, dpid, in_port, arp_header):
         LOGGER.info("Handle ARP packet")
 
-        # Do {IP => MAC} learning
-        self._do_arp_learning(arp_header, txn)
-        # Process ARP request
-        if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(dpid, in_port, arp_header, txn)
-        # Process ARP reply
-        elif arp_header.opcode == arp.ARP_REPLY:
-            self._handle_arp_reply(arp_header, txn)
-
-    def _do_arp_learning(self, arp_header, txn):
-        """Learn IP => MAC mapping from a received ARP packet, update
-        ip_to_mac and mac_to_ip table.
-        """
         # ERROR: dst_mac unparsable from arp_header
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
 
-        if src_ip not in self.ip_to_mac:
-            self.update_arp_mapping(src_ip, src_mac, self.dcenter, txn)
-            for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter)
+        # Do {IP => MAC} learning
+        log_tuple = (src_ip, src_mac)
+        self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
+        self.do_arp_learning(src_ip, src_mac)
+        self.inception.delete_failover_log(i_conf.ARP_LEARNING)
+        # Process ARP request
+        if arp_header.opcode == arp.ARP_REQUEST:
+            self._handle_arp_request(dpid, in_port, arp_header)
+        # Process ARP reply
+        elif arp_header.opcode == arp.ARP_REPLY:
+            self._handle_arp_reply(arp_header)
 
-    def update_arp_mapping(self, ip, mac, dcenter, txn):
+    def do_arp_learning(self, src_ip, src_mac):
+        """Learn IP => MAC mapping from a received ARP packet, update
+        ip_to_mac and mac_to_ip table.
+        """
+        if (src_ip, src_mac) in self.ip_to_mac.items():
+            # Duplicate arp learning
+            return
+
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter)
+        self.update_arp_mapping(src_ip, src_mac, self.dcenter)
+
+    def update_arp_mapping(self, ip, mac, dcenter):
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
         if ip in self.ip_to_mac:
-            txn.set_data(zk_path_ip, mac)
+            self.zk.set_data(zk_path_ip, mac)
         else:
-            txn.create(zk_path_ip, mac)
+            self.zk.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
         self.mac_to_ip[mac] = ip
-        LOGGER.info("Learn: (ip=%s) => (mac=%s, dcenter=%s)", ip, mac, dcenter)
+        LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
+                    ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         """
@@ -144,7 +152,7 @@ class InceptionArp(object):
 
         return packet_out
 
-    def _handle_arp_request(self, dpid, in_port, arp_header, txn):
+    def _handle_arp_request(self, dpid, in_port, arp_header):
         """Process ARP request packet."""
 
         src_ip = arp_header.src_ip
@@ -205,7 +213,7 @@ class InceptionArp(object):
             LOGGER.info("Send ARP reply of (ip=%s) to (ip=%s): ",
                         src_ip, dst_ip)
 
-    def _handle_arp_reply(self, arp_header, txn):
+    def _handle_arp_reply(self, arp_header):
         """Process ARP reply packet."""
 
         src_ip = arp_header.src_ip

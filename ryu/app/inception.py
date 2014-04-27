@@ -195,7 +195,6 @@ class Inception(app_manager.RyuApp):
         """Handle when a switch event is received."""
         datapath = event.dp
         dpid = dpid_to_str(datapath.id)
-        txn = self.zk.transaction()
 
         # A new switch connects
         if event.enter:
@@ -207,12 +206,11 @@ class Inception(app_manager.RyuApp):
                 self.vm_id_slots[dpid] = [False] * (i_conf.VM_MAXID + 1)
 
             switch_vmac = self.register_switch(dpid, ip)
-            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports,
-                                           txn)
+            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports)
             self.set_default_flows(datapath, local_ports)
             if dpid == self.gateway:
-                self.handle_waitinglist(ip, txn)
-            self.set_dcenter_flows(dpid, txn)
+                self.handle_waitinglist(ip)
+            self.set_dcenter_flows(dpid)
             self.do_failover()
 
         # A switch disconnects
@@ -238,10 +236,8 @@ class Inception(app_manager.RyuApp):
                 zk_data, _ = self.zk.get(zk_path)
                 _, dpid_record, _ = i_util.str_to_tuple(zk_data)
                 if dpid_record == dpid:
-                    txn.delete(zk_path)
+                    self.zk.delete(zk_path)
             LOGGER.info("Del: (switch=%s) mac_to_position", dpid)
-
-        txn.commit()
 
     def register_switch(self, dpid, switch_ip):
         """Store necessary info of a newly connected switch"""
@@ -264,7 +260,7 @@ class Inception(app_manager.RyuApp):
 
         return switch_vmac
 
-    def handle_waitinglist(self, gateway_ip, txn):
+    def handle_waitinglist(self, gateway_ip):
         """Handle dpid_waitinglist: install dpid-to-remote-datacenter flow"""
         for dcenter in self.dcenter_to_info:
             peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
@@ -272,9 +268,9 @@ class Inception(app_manager.RyuApp):
                 gw_fwd_port = self.dpid_to_conns[dpid_pending][gateway_ip]
                 self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
                                        i_conf.DCENTER_MASK,
-                                       gw_fwd_port, txn)
+                                       gw_fwd_port)
 
-    def set_dcenter_flows(self, dpid, txn):
+    def set_dcenter_flows(self, dpid):
         """Set up flows to other datacenters"""
         # Switchs connected after gateway: set up flows towards
         # remote datacenters through gateway
@@ -286,12 +282,12 @@ class Inception(app_manager.RyuApp):
                     gw_fwd_port = self.dpid_to_conns[dpid][gw_ip]
                     self.set_nonlocal_flow(dpid, peer_dc_vmac,
                                            i_conf.DCENTER_MASK,
-                                           gw_fwd_port, txn)
+                                           gw_fwd_port)
         else:
             # The gateway switch has not connected
             self.gateway_waitinglist.append(dpid)
 
-    def parse_ports(self, dpid, switch_ip, switch_vmac, ports, txn):
+    def parse_ports(self, dpid, switch_ip, switch_vmac, ports):
         """Collect port information.  Sift out ports connecting peer
         switches and set up necessary flows
 
@@ -327,10 +323,9 @@ class Inception(app_manager.RyuApp):
                     peer_fwd_port = self.dpid_to_conns[peer_dpid][switch_ip]
                     swc_mask = i_conf.SWITCH_MASK
 
-                    self.set_nonlocal_flow(dpid, peer_vmac, swc_mask,
-                                           port_no, txn)
-                    self.set_nonlocal_flow(peer_dpid, switch_vmac,
-                                           swc_mask, peer_fwd_port, txn)
+                    self.set_nonlocal_flow(dpid, peer_vmac, swc_mask, port_no)
+                    self.set_nonlocal_flow(peer_dpid, switch_vmac, swc_mask,
+                                           peer_fwd_port)
 
             elif port.name == 'eth_dhcpp':
                 LOGGER.info("DHCP server is found!")
@@ -350,8 +345,8 @@ class Inception(app_manager.RyuApp):
 
                 # Install gateway-to-remote-gateway flow
                 peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                self.set_nonlocal_flow(dpid, peer_dc_vmac,
-                                       i_conf.DCENTER_MASK, port_no, txn)
+                self.set_nonlocal_flow(dpid, peer_dc_vmac, i_conf.DCENTER_MASK,
+                                       port_no)
 
             else:
                 # Store the port connecting local guests
@@ -375,6 +370,14 @@ class Inception(app_manager.RyuApp):
             log_path = os.path.join(CONF.zk_failover, znode)
             data, _ = self.zk.get(log_path)
             data_tuple = i_util.str_to_tuple(data)
+
+            if znode == i_conf.SOURCE_LEARNING:
+                self.learn_new_vm(*data_tuple)
+                self.delete_failover_log(i_conf.SOURCE_LEARNING)
+
+            if znode == i_conf.ARP_LEARNING:
+                self.inception_arp.do_arp_learning(data_tuple)
+                self.delete_failover_log(i_conf.ARP_LEARNING)
 
             if znode == i_conf.MIGRATION:
                 self.handle_migration(*data_tuple)
@@ -496,24 +499,21 @@ class Inception(app_manager.RyuApp):
         in_port = str(msg.match['in_port'])
 
         # TODO(chen): Now we assume VMs are registered during DHCP and
-        # gratuitous ARP during boot-up. Transaction is not needed.
-        # No need to transaction during VM live migration
-        txn = self.zk.transaction()
-        self._process_packet_in(dpid, in_port, msg.data, txn)
-        txn.commit()
+        # gratuitous ARP during boot-up.
+        self._process_packet_in(dpid, in_port, msg.data)
 
-    def _process_packet_in(self, dpid, in_port, data, txn):
+    def _process_packet_in(self, dpid, in_port, data):
         """Process raw data received from dpid through in_port."""
         whole_packet = packet.Packet(data)
         ethernet_header = whole_packet.get_protocol(ethernet.ethernet)
         ethernet_src = ethernet_header.src
 
         # do source learning
-        self._do_source_learning(dpid, in_port, ethernet_src, txn)
+        self._do_source_learning(dpid, in_port, ethernet_src)
         # handle ARP packet if it is
         if ethernet_header.ethertype == ether.ETH_TYPE_ARP:
             arp_header = whole_packet.get_protocol(arp.arp)
-            self.inception_arp.handle(dpid, in_port, arp_header, txn)
+            self.inception_arp.handle(dpid, in_port, arp_header)
         # handle DHCP packet if it is
         # ERROR: DHCP header unparsable in ryu.
         if ethernet_header.ethertype == ether.ETH_TYPE_IP:
@@ -525,36 +525,48 @@ class Inception(app_manager.RyuApp):
                     self.inception_dhcp.handle(udp_header, ethernet_header,
                                                data)
 
-    def _do_source_learning(self, dpid, in_port, ethernet_src, txn):
+    def _do_source_learning(self, dpid, in_port, ethernet_src):
         """Learn MAC => (switch dpid, switch port) mapping from a packet,
         update data in i_conf.MAC_TO_POSITION. Also set up flow table for
         forwarding broadcast message.
         """
         if ethernet_src not in self.mac_to_position:
-            vm_id = i_util.generate_vm_id(ethernet_src, dpid, self.vm_id_slots)
-            switch_vmac = self.dpid_to_vmac[dpid]
-            vmac = i_util.create_vm_vmac(switch_vmac, vm_id)
-            self.update_position(ethernet_src, self.dcenter, dpid, in_port,
-                                 vmac, txn)
-            for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_position(ethernet_src, self.dcenter, dpid,
-                                           in_port, vmac)
-            self.set_local_flow(dpid, vmac, ethernet_src, in_port)
+            # New VM
+            log_tuple = (dpid, in_port, ethernet_src)
+            self.create_failover_log(i_conf.SOURCE_LEARNING, log_tuple)
+            self.learn_new_vm(dpid, in_port, ethernet)
+            self.delete_failover_log(i_conf.SOURCE_LEARNING)
         else:
             position = self.mac_to_position[ethernet_src]
             dcenter_old, dpid_old, port_old, vmac = position
-            # The guest's switch changes, e.g., due to a VM migration
-            # We assume the environment is safe and attack is out of question
             if (dpid_old, port_old) == (dpid, in_port):
                 # No migration
                 return False
 
+            # The guest's switch changes, e.g., due to a VM migration
             log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
                          dpid, in_port)
             self.create_failover_log(i_conf.MIGRATION, log_tuple)
             self.handle_migration(ethernet_src, dcenter_old, dpid_old,
                                   port_old, vmac, dpid, in_port)
             self.delete_failover_log(i_conf.MIGRATION)
+
+    def learn_new_vm(self, dpid, port, mac):
+        """Create vmac for new vm; Store vm position info;
+        and install local forwarding flow"""
+        if mac in self.mac_to_position:
+            # vmac exists. Last controller crashes after creating vmac
+            _, _, _, vmac = self.mac_to_position[mac]
+        else:
+            vm_id = i_util.generate_vm_id(mac, dpid, self.vm_id_slots)
+            switch_vmac = self.dpid_to_vmac[dpid]
+            vmac = i_util.create_vm_vmac(switch_vmac, vm_id)
+            for rpc_client in self.dcenter_to_rpc.values():
+                rpc_client.update_position(mac, self.dcenter, dpid,
+                                           port, vmac)
+            self.update_position(mac, self.dcenter, dpid, port, vmac)
+
+        self.set_local_flow(dpid, vmac, mac, port)
 
     def create_failover_log(self, log_type, data_tuple):
         # Failover logging
@@ -581,27 +593,21 @@ class Inception(app_manager.RyuApp):
                 command=command,
                 instructions=instructions))
 
-    def update_position(self, mac, dcenter, dpid, port, vmac, txn=None):
+    def update_position(self, mac, dcenter, dpid, port, vmac):
         """Update guest MAC and its connected switch"""
         data_tuple = (dcenter, dpid, port, vmac)
         if mac in self.mac_to_position:
+            # Do not update duplicate information
             record = self.mac_to_position[mac]
             if record == data_tuple:
                 return
 
         zk_data = i_util.tuple_to_str((dcenter, dpid, port, vmac))
         zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
-        # TODO(chen): Get rid of too much if-else here
         if mac in self.mac_to_position:
-            if txn is not None:
-                txn.set_data(zk_path, zk_data)
-            else:
-                self.zk.set(zk_path, zk_data)
+            self.zk.set(zk_path, zk_data)
         else:
-            if txn is not None:
-                txn.create(zk_path, zk_data)
-            else:
-                self.zk.create(zk_path, zk_data)
+            self.zk.create(zk_path, zk_data)
         self.mac_to_position[mac] = (dcenter, dpid, port, vmac)
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s,"
                     "vmac=%s)", mac, dcenter, dpid, port, vmac)
@@ -618,7 +624,6 @@ class Inception(app_manager.RyuApp):
             if vmac_record == vmac_old:
                 # A new vmac has not been created
                 switch_vmac = self.dpid_to_vmac[dpid_new]
-                # TODO(Chen): Increase top id
                 vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
                 vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
             else:
@@ -744,7 +749,7 @@ class Inception(app_manager.RyuApp):
                       command=flow_cmd,
                       instructions=instructions)
 
-    def set_nonlocal_flow(self, dpid, mac, mask, port, txn, flow_add=True):
+    def set_nonlocal_flow(self, dpid, mac, mask, port, flow_add=True):
         """Set up a microflow for unicast on switch DPID towards MAC
 
         @param flow_add: Boolean value.
