@@ -42,6 +42,7 @@ from ryu.lib import hub
 from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import udp
+from ryu.lib.packet import dhcp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
 from ryu import log
@@ -515,15 +516,17 @@ class Inception(app_manager.RyuApp):
             arp_header = whole_packet.get_protocol(arp.arp)
             self.inception_arp.handle(dpid, in_port, arp_header)
         # handle DHCP packet if it is
-        # ERROR: DHCP header unparsable in ryu.
         if ethernet_header.ethertype == ether.ETH_TYPE_IP:
             ip_header = whole_packet.get_protocol(ipv4.ipv4)
             if ip_header.proto == inet.IPPROTO_UDP:
                 udp_header = whole_packet.get_protocol(udp.udp)
                 if udp_header.src_port in (i_dhcp.CLIENT_PORT,
                                            i_dhcp.SERVER_PORT):
-                    self.inception_dhcp.handle(udp_header, ethernet_header,
-                                               data)
+                    # Parsing DHCP packet
+                    # TODO(chen): RYU does not parse DHCP now.
+                    dhcp_binary = whole_packet.protocols[-1]
+                    dhcp_header, _, _ = dhcp.dhcp.parser(dhcp_binary)
+                    self.inception_dhcp.handle(dhcp_header, data)
 
     def _do_source_learning(self, dpid, in_port, ethernet_src):
         """Learn MAC => (switch dpid, switch port) mapping from a packet,
