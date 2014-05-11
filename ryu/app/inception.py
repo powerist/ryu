@@ -86,7 +86,7 @@ class Inception(app_manager.RyuApp):
         zk_logger.setLevel(zk_log_level)
         zk_console_handler = logging.StreamHandler()
         zk_console_handler.setLevel(zk_log_level)
-        zk_console_handler.setFormatter(CONF.log_formatter)
+        zk_console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
         zk_logger.addHandler(zk_console_handler)
         self.zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
         self.zk.start()
