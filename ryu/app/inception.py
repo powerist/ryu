@@ -303,16 +303,8 @@ class Inception(app_manager.RyuApp):
             # CONF.ip_prefix.184.53. Only store the port
             # connecting remote host.
             port_no = str(port.port_no)
-            # TODO(chen): Define functions in inception_util
-            # to hide name processing
-            # TODO(chen): Port name should be used
-            # as a well-defined index.
-
-            # TODO(chen): Clean up logic here
             if port.name.startswith('obr') and '_' in port.name:
-                _, ip_suffix = port.name.split('_')
-                ip_suffix = ip_suffix.replace('-', '.')
-                peer_ip = '.'.join((CONF.ip_prefix, ip_suffix))
+                peer_ip = i_util.extract_ip_addr(CONF.ip_prefix, port.name)
                 self.dpid_to_conns[dpid][peer_ip] = port_no
                 LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                             dpid, peer_ip, port_no)
