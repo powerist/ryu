@@ -37,6 +37,16 @@ def str_to_tuple(data_string, sep=','):
     return data_tuple
 
 
+def extract_ip_addr(ip_prefix, port_name):
+    """Extract IP address from port name"""
+
+    _, ip_suffix = port_name.split('_')
+    ip_suffix = ip_suffix.replace('-', '.')
+    peer_ip = '.'.join((ip_prefix, ip_suffix))
+
+    return peer_ip
+
+
 def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     """Convert string to dictionary"""
     peer_dcs_list = peer_dcenters.split(out_sep)
