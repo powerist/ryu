@@ -39,8 +39,8 @@ CONF.register_cli_opts([
     cfg.StrOpt('log-config-file', default=None,
                help='Path to a logging config file to use'),
     cfg.StrOpt('log_formatter',
-               default=logging.Formatter('%(asctime)s - %(name)s - '
-                                         '%(levelname)s -%(message)s'),
+               default=('%(asctime)s - %(name)s - %(levelname)s - '
+                        '%(threadName)s - %(message)s'),
                help='log formatter'),
 ])
 
@@ -91,7 +91,7 @@ def init_log():
 
     if CONF.use_stderr:
         console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setFormatter(CONF.log_formatter)
+        console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
         log.addHandler(console_handler)
     if _EARLY_LOG_HANDLER is not None:
         log.removeHandler(_EARLY_LOG_HANDLER)
