@@ -129,14 +129,18 @@ class Inception(app_manager.RyuApp):
         self.switch_count = 0
         self.switch_maxid = 0
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
-        peer_dcenters = CONF.peer_dcenters
-        self.dcenter_to_info = i_util.parse_peer_dcenters(peer_dcenters)
+        if CONF.peer_dcenters is None:
+            self.single_dcenter = True
+        else:
+            self.single_dcenter = False
+            peer_dcenters = CONF.peer_dcenters
+            self.dcenter_to_info = i_util.parse_peer_dcenters(peer_dcenters)
+
         # Record the dpids on which to install flows to other datacenters
         # when gateway is connected
         self.gateway_waitinglist = []
         # Switch virtual MAC
         self.dpid_to_vmac = {}
-        self.dcenter_to_rpc = {}
         self.dpid_to_topid = {}
 
         ## Inception relevent modules
@@ -144,14 +148,17 @@ class Inception(app_manager.RyuApp):
         self.inception_arp = i_arp.InceptionArp(self)
         # DHCP
         self.inception_dhcp = i_dhcp.InceptionDhcp(self)
-        # RPC
-        self.inception_rpc = i_rpc.InceptionRpc(self)
 
-        self.setup_rpc()
         self.initiate_cache()
+
+        if not self.single_dcenter:
+            # RPC
+            self.inception_rpc = i_rpc.InceptionRpc(self)
+            self.setup_rpc()
 
     def setup_rpc(self):
         """Set up RPC server and RPC client to other controllers"""
+        self.dcenter_to_rpc = {}
 
         # RPC server
         host_addr = socket.gethostbyname(socket.gethostname())
@@ -350,7 +357,6 @@ class Inception(app_manager.RyuApp):
     def do_failover(self):
         """Do failover"""
         if self.switch_count == CONF.num_switches:
-            # TODO(chen): Failover with rpc
             self._do_failover()
 
     def _do_failover(self):
@@ -529,7 +535,7 @@ class Inception(app_manager.RyuApp):
             # New VM
             log_tuple = (dpid, in_port, ethernet_src)
             self.create_failover_log(i_conf.SOURCE_LEARNING, log_tuple)
-            self.learn_new_vm(dpid, in_port, ethernet)
+            self.learn_new_vm(dpid, in_port, ethernet_src)
             self.delete_failover_log(i_conf.SOURCE_LEARNING)
         else:
             position = self.mac_to_position[ethernet_src]
@@ -556,9 +562,10 @@ class Inception(app_manager.RyuApp):
             vm_id = i_util.generate_vm_id(mac, dpid, self.vm_id_slots)
             switch_vmac = self.dpid_to_vmac[dpid]
             vmac = i_util.create_vm_vmac(switch_vmac, vm_id)
-            for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_position(mac, self.dcenter, dpid,
-                                           port, vmac)
+            if not self.single_dcenter:
+                for rpc_client in self.dcenter_to_rpc.values():
+                    rpc_client.update_position(mac, self.dcenter, dpid, port,
+                                               vmac)
             self.update_position(mac, self.dcenter, dpid, port, vmac)
 
         self.set_local_flow(dpid, vmac, mac, port)
@@ -681,9 +688,10 @@ class Inception(app_manager.RyuApp):
             # Store vmac_new
             self.update_position(mac, self.dcenter, dpid_new, port_new,
                                  vmac_new)
-            for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_position(mac, self.dcenter, dpid_new,
-                                           port_new, vmac_new)
+            if not self.single_dcenter:
+                for rpc_client in self.dcenter_to_rpc.values():
+                    rpc_client.update_position(mac, self.dcenter, dpid_new,
+                                               port_new, vmac_new)
             # Instruct dpid_old to redirect traffic
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]

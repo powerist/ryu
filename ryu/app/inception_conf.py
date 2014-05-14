@@ -55,7 +55,7 @@ CONF.register_opts([
                 help="Default OpenFlow versions to use"),
     # TODO: multiple neighbor datacenters
     cfg.StrOpt('peer_dcenters',
-               default='0',
+               default=None,
                help="Neighbor datacenter identification"),
     # TODO: multiple remote controllers
     cfg.StrOpt('remote_controller',
@@ -105,3 +105,7 @@ SOURCE_LEARNING = "source_learning"
 ARP_LEARNING = "arp_learning"
 RPC_REDIRECT_FLOW = "rpc_redirect_flow"
 RPC_GATEWAY_FLOW = "rpc_gateway_flow"
+
+# Table id
+PRIMARY_TABLE = 0
+SECONDARY_TABLE = 1

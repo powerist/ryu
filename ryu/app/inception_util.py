@@ -40,9 +40,8 @@ def str_to_tuple(data_string, sep=','):
 def extract_ip_addr(ip_prefix, port_name):
     """Extract IP address from port name"""
 
-    _, ip_suffix = port_name.split('_')
-    ip_suffix = ip_suffix.replace('-', '.')
-    peer_ip = '.'.join((ip_prefix, ip_suffix))
+    _, ip_suffix1, ip_suffix2 = port_name.split('_')
+    peer_ip = '.'.join((ip_prefix, ip_suffix1, ip_suffix2))
 
     return peer_ip
 
