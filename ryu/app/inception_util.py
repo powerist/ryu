@@ -57,6 +57,18 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     return peer_dcs_dic
 
 
+def parse_tenants(tenant_info, out_sep=';', in_sep=','):
+    """Convert string to list of tuples"""
+    tenant_str_list = tenant_info.split(out_sep)
+    tenant_list = []
+    for tenant_str in tenant_str_list:
+        mac_list = tenant_str.split(in_sep)
+        mac_tuple = tuple(mac_list)
+        tenant_list.append(mac_tuple)
+
+    return tenant_list
+
+
 def generate_vm_id(vm_mac, dpid, conflict_record):
     """Generate a new vm_id,
     00 is saved for switch"""
@@ -108,13 +120,15 @@ def create_swc_vmac(dcenter_vmac, dpid, conflict_record):
     return ':'.join((dcenter_prefix, switch_suffix))
 
 
-def create_vm_vmac(switch_vmac, vm_id):
+def create_vm_vmac(switch_vmac, vm_id, tenant_id):
     """Generate virtual MAC address of a VM"""
 
     switch_prefix = get_swc_prefix(switch_vmac)
-    id_hex = vm_id & 0xff
-    id_suffix = "%02x" % id_hex
-    return ':'.join((switch_prefix, id_suffix, '00'))
+    vm_id_hex = vm_id & 0xff
+    vm_id_suffix = "%02x" % vm_id_hex
+    tenant_id_hex = tenant_id & 0xff
+    tenant_id_suffix = "%02x" % tenant_id_hex
+    return ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
 
 
 def get_swc_prefix(vmac):
