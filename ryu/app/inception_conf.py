@@ -53,10 +53,12 @@ CONF.register_opts([
     cfg.ListOpt('ofp_versions',
                 default=[ofproto_v1_2.OFP_VERSION],
                 help="Default OpenFlow versions to use"),
-    # TODO: multiple neighbor datacenters
     cfg.StrOpt('peer_dcenters',
                default=None,
                help="Neighbor datacenter identification"),
+    cfg.BoolOpt('arp_bcast',
+                default=False,
+                help='Allow/Disallow ARP broadcast'),
     # TODO: multiple remote controllers
     cfg.StrOpt('remote_controller',
                default='127.0.0.1',
