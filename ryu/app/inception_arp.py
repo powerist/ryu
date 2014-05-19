@@ -19,6 +19,8 @@ import logging
 import os
 import time
 
+from oslo.config import cfg
+
 from ryu.app import inception_conf as i_conf
 from ryu.lib import mac
 from ryu.lib.dpid import dpid_to_str
@@ -29,6 +31,9 @@ from ryu.lib.packet import packet
 from ryu.ofproto import ether
 
 LOGGER = logging.getLogger(__name__)
+
+CONF = cfg.CONF
+CONF.import_opt('arp_bcast', 'ryu.app.inception_conf')
 
 
 class InceptionArp(object):
@@ -165,12 +170,12 @@ class InceptionArp(object):
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
         _, _, _, src_vmac = self.mac_to_position[src_mac]
         if dst_ip not in self.ip_to_mac:
-            # If entry not found, broadcast request
-            self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
-            if not self.single_dcenter:
-                for rpc_client in self.dcenter_to_rpc.values():
-                    rpc_client.broadcast_arp_request(src_ip, src_vmac,
-                                                     dst_ip, dpid)
+            if CONF.arp_bcast:
+                self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
+                if not self.single_dcenter:
+                    for rpc_client in self.dcenter_to_rpc.values():
+                        rpc_client.broadcast_arp_request(src_ip, src_vmac,
+                                                         dst_ip, dpid)
         else:
             dst_mac = self.ip_to_mac[arp_header.dst_ip]
             dst_dcenter, _, _, dst_vmac = self.mac_to_position[dst_mac]
