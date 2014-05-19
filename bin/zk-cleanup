@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # -*- coding: utf-8 -*-
 
 #    Copyright (C) 2014 AT&T Labs All Rights Reserved.
@@ -16,13 +18,19 @@
 #    under the License.
 
 import logging
+import os
+import sys
 
 from kazoo import client
 from oslo.config import cfg
 
+SELF_DIR = os.path.abspath(os.path.dirname(__file__))
+TOP_DIR = os.path.abspath(os.path.join(SELF_DIR,
+                                       os.pardir))
+sys.path.insert(0, TOP_DIR)
 from ryu import log
 
-LOGGER = logging.getLogger('cleanup-zk')
+LOGGER = logging.getLogger('zk-cleanup')
 
 CONF = cfg.CONF
 CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
@@ -33,13 +41,19 @@ CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 
 
 def main():
+    config_file = None
     try:
-        CONF(project='ryu',
-             default_config_files=['/usr/local/etc/ryu/ryu.conf'])
+        config_file = '/usr/local/etc/ryu/ryu.conf'
+        CONF(project='ryu', default_config_files=[config_file])
     except cfg.ConfigFilesNotFoundError:
-        CONF(project='ryu')
+        try:
+            config_file = os.path.join(TOP_DIR, 'etc/ryu/inception.conf')
+            CONF(project='ryu', default_config_files=[config_file])
+        except cfg.ConfigFilesNotFoundError:
+            CONF(project='ryu')
 
     log.init_log()
+    LOGGER.info('config_file=%s', config_file)
 
     zk_logger = logging.getLogger('kazoo')
     zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
@@ -51,11 +65,11 @@ def main():
     zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
     zk.start()
 
-    LOGGER.info('Clean up ZooKeeper path=(%s)', CONF.zk_data)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_data)
     zk.delete(CONF.zk_data, recursive=True)
-    LOGGER.info('Clean up ZooKeeper path=(%s)', CONF.zk_failover)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_failover)
     zk.delete(CONF.zk_failover, recursive=True)
-    LOGGER.info('Clean up ZooKeeper path=(%s)', CONF.zk_election)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_election)
     zk.delete(CONF.zk_election, recursive=True)
 
 

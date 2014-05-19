@@ -15,5 +15,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+
+SELF_DIR = os.path.abspath(os.path.dirname(__file__))
+TOP_DIR = os.path.abspath(os.path.join(SELF_DIR,
+                                       os.pardir))
+sys.path.insert(0, TOP_DIR)
 from ryu.cmd.manager import main
+
 main()
