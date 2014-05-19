@@ -16,33 +16,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ryu.lib import hub
-hub.patch()
-
-# TODO:
-#   Right now, we have our own patched copy of ovs python bindings
-#   Once our modification is upstreamed and widely deployed,
-#   use it
-#
-# NOTE: this modifies sys.path and thus affects the following imports.
-# eg. oslo.config.cfg.
-import ryu.contrib
-
-from oslo.config import cfg
 import logging
+import os
 import sys
 
+from oslo.config import cfg
 from kazoo.client import KazooClient
 
+SELF_DIR = os.path.abspath(os.path.dirname(__file__))
+TOP_DIR = os.path.abspath(os.path.join(SELF_DIR,
+                                       os.pardir,
+                                       os.pardir))
+sys.path.insert(0, TOP_DIR)
+from ryu.lib import hub
 from ryu import log
-log.early_init_log(logging.DEBUG)
-
-from ryu import flags
 from ryu import version
 from ryu.app import wsgi
 from ryu.base.app_manager import AppManager
-from ryu.controller import controller
-from ryu.topology import switches
+#from ryu import flags
+#from ryu.controller import controller
+#from ryu.topology import switches
+#
+# # TODO:
+# #   Right now, we have our own patched copy of ovs python bindings
+# #   Once our modification is upstreamed and widely deployed,
+# #   use it
+# #
+# # NOTE: this modifies sys.path and thus affects the following imports.
+# # eg. oslo.config.cfg.
+# import ryu.contrib
+
+log.early_init_log(logging.DEBUG)
+hub.patch()
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,14 +62,23 @@ CONF.register_cli_opts([
 CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
 CONF.import_opt('zk_election', 'ryu.app.inception_conf')
 
+
 def main():
+    config_file = None
     try:
+        config_file = '/usr/local/etc/ryu/ryu.conf'
         CONF(project='ryu', version='ryu-manager %s' % version,
-             default_config_files=['/usr/local/etc/ryu/ryu.conf'])
+             default_config_files=[config_file])
     except cfg.ConfigFilesNotFoundError:
-        CONF(project='ryu', version='ryu-manager %s' % version)
+        try:
+            config_file = os.path.join(TOP_DIR, 'etc/ryu/inception.conf')
+            CONF(project='ryu', version='ryu-manager %s' % version,
+                 default_config_files=[config_file])
+        except cfg.ConfigFilesNotFoundError:
+            CONF(project='ryu', version='ryu-manager %s' % version)
 
     log.init_log()
+    LOGGER.info('config_file=%s', config_file)
 
     LOGGER.info('ZooKeeper servers=%s', CONF.zk_servers)
     zk = KazooClient(hosts=CONF.zk_servers, logger=LOGGER)
