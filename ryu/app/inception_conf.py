@@ -59,6 +59,12 @@ CONF.register_opts([
     cfg.BoolOpt('arp_bcast',
                 default=False,
                 help='Allow/Disallow ARP broadcast'),
+    cfg.BoolOpt('forwarding_bcast',
+                default=False,
+                help='Allow/Disallow all-to-all broadcast'),
+    cfg.StrOpt('tenant_info',
+               default=None,
+               help="Tenant group"),
     # TODO: multiple remote controllers
     cfg.StrOpt('remote_controller',
                default='127.0.0.1',
@@ -97,8 +103,8 @@ DPID_TO_VMAC = os.path.join(CONF.zk_data, 'dpid_to_vmac')
 
 DCENTER_MASK = "ff:ff:00:00:00:00"
 SWITCH_MASK = "ff:ff:ff:ff:00:00"
+TENANT_MASK = "00:00:00:00:00:ff"
 SWITCH_MAXID = 65535
-VM_MASK = "ff:ff:ff:ff:ff:00"
 VM_MAXID = 65535
 
 # Failover type

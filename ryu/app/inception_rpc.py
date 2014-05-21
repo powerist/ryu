@@ -15,6 +15,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 from ryu.app import inception_conf as i_conf
+from ryu.lib.dpid import str_to_dpid
 
 
 class InceptionRpc(object):
@@ -48,6 +49,9 @@ class InceptionRpc(object):
 
     def update_position(self, mac, dcenter, dpid, port, vmac):
         self.inception.update_position(mac, dcenter, dpid, port, vmac)
+
+    def del_tenant_filter(self, dpid, mac):
+        self.inception.del_tenant_filter(dpid, mac)
 
     def redirect_local_flow(self, dpid_old, mac, vmac_old, vmac_new,
                             dcenter_new):

@@ -61,8 +61,10 @@ CONF.import_opt('self_dcenter', 'ryu.app.inception_conf')
 CONF.import_opt('rpc_port', 'ryu.app.inception_conf')
 CONF.import_opt('ofp_versions', 'ryu.app.inception_conf')
 CONF.import_opt('peer_dcenters', 'ryu.app.inception_conf')
+CONF.import_opt('tenant_info', 'ryu.app.inception_conf')
 CONF.import_opt('remote_controller', 'ryu.app.inception_conf')
 CONF.import_opt('num_switches', 'ryu.app.inception_conf')
+CONF.import_opt('forwarding_bcast', 'ryu.app.inception_conf')
 
 
 class Inception(app_manager.RyuApp):
@@ -125,6 +127,12 @@ class Inception(app_manager.RyuApp):
         self.switch_id_slots = [False] * (i_conf.SWITCH_MAXID + 1)
         # Record vm id assignment of each switch
         self.vm_id_slots = {}
+        # Record the tenant information
+        self.mac_to_tenant = {}
+        tenant_list = i_util.parse_tenants(CONF.tenant_info)
+        for tenant_id, mac_tuple in enumerate(tenant_list, 1):
+            for mac in mac_tuple:
+                self.mac_to_tenant[mac] = tenant_id
 
         self.switch_count = 0
         self.switch_maxid = 0
@@ -391,13 +399,17 @@ class Inception(app_manager.RyuApp):
                 self.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
 
     def set_default_flows(self, datapath, non_mesh_ports):
-        """Set up default flows on a connected switch"""
-
-        # Set up one flow for ARP messages.
-        # Intercepts all ARP packets and send them to the controller
+        """Set up default flows on a connected switch.
+        Default flows are categarized into two tables:
+        Table 1: tenant filter
+        Table 2: destination-based forwarding
+        """
         ofproto = datapath.ofproto
         ofproto_parser = datapath.ofproto_parser
 
+        # Table 1 setup
+        # Set up one flow for ARP messages.
+        # Intercepts all ARP packets and send them to the controller
         actions_arp = [ofproto_parser.OFPActionOutput(
             ofproto.OFPP_CONTROLLER,
             ofproto.OFPCML_NO_BUFFER)]
@@ -407,11 +419,11 @@ class Inception(app_manager.RyuApp):
         match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
         self.set_flow(datapath=datapath,
                       match=match_arp,
+                      table_id=i_conf.PRIMARY_TABLE,
                       priority=i_priority.ARP,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=ofproto.OFPFC_ADD,
                       instructions=instruction_arp)
-
         # Set up two flows for DHCP messages
         actions_dhcp = [ofproto_parser.OFPActionOutput(
             ofproto.OFPP_CONTROLLER,
@@ -428,6 +440,7 @@ class Inception(app_manager.RyuApp):
         # (1) Intercept all DHCP request packets and send to the controller
         self.set_flow(datapath=datapath,
                       match=match_client,
+                      table_id=i_conf.PRIMARY_TABLE,
                       priority=i_priority.DHCP,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=ofproto.OFPFC_ADD,
@@ -435,46 +448,11 @@ class Inception(app_manager.RyuApp):
         # (2) Intercept all DHCP reply packets and send to the controller
         self.set_flow(datapath=datapath,
                       match=match_server,
+                      table_id=i_conf.PRIMARY_TABLE,
                       priority=i_priority.DHCP,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=ofproto.OFPFC_ADD,
                       instructions=instruction_dhcp)
-
-        # Set up two parts of flows for broadcast messages
-        # (1) Broadcast messages from each non-mesh port: forward to all
-        # (other) ports
-        actions_bcast_out = [ofproto_parser.OFPActionOutput(ofproto.OFPP_ALL)]
-        instructions_bcast_out = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_bcast_out)]
-        for port_no in non_mesh_ports:
-            match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
-                                                eth_dst=mac.BROADCAST_STR)
-            self.set_flow(datapath=datapath,
-                          match=match_out,
-                          priority=i_priority.HOST_BCAST,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instructions_bcast_out)
-        # (2) Broadcast messages from each (tunnel) port: forward
-        # to all local ports. Since i_priority.SWITCH_BCAST <
-        # i_priority.HOST_BCAST, this guarantees that only
-        # tunnel-port message will trigger this flow
-        actions_bcast_in = [
-            ofproto_parser.OFPActionOutput(port=int(port_no))
-            for port_no in non_mesh_ports]
-        instruction_bcast_in = [
-            ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions_bcast_in)]
-        match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
-        self.set_flow(datapath=datapath,
-                      match=match_in,
-                      priority=i_priority.SWITCH_BCAST,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_bcast_in)
 
         # To prevent loop, all non-matching packets are dropped
         instruction_norm = [
@@ -484,6 +462,62 @@ class Inception(app_manager.RyuApp):
         match_norm = ofproto_parser.OFPMatch()
         self.set_flow(datapath=datapath,
                       match=match_norm,
+                      table_id=i_conf.PRIMARY_TABLE,
+                      priority=i_priority.NORMAL,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_norm)
+
+        if CONF.forwarding_bcast:
+            # Set up two parts of flows for broadcast messages
+            # (1) Broadcast messages from each non-mesh port: forward to all
+            # (other) ports
+            actions_bcast_out = [ofproto_parser.OFPActionOutput(
+                                                            ofproto.OFPP_ALL)]
+            instructions_bcast_out = [
+                datapath.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions_bcast_out)]
+            for port_no in non_mesh_ports:
+                match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
+                                                    eth_dst=mac.BROADCAST_STR)
+                self.set_flow(datapath=datapath,
+                              match=match_out,
+                              table_id=i_conf.SECONDARY_TABLE,
+                              priority=i_priority.HOST_BCAST,
+                              flags=ofproto.OFPFF_SEND_FLOW_REM,
+                              command=ofproto.OFPFC_ADD,
+                              instructions=instructions_bcast_out)
+            # (2) Broadcast messages from each (tunnel) port: forward
+            # to all local ports. Since i_priority.SWITCH_BCAST <
+            # i_priority.HOST_BCAST, this guarantees that only
+            # tunnel-port message will trigger this flow
+            actions_bcast_in = [
+                ofproto_parser.OFPActionOutput(port=int(port_no))
+                for port_no in non_mesh_ports]
+            instruction_bcast_in = [
+                ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions_bcast_in)]
+            match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
+            self.set_flow(datapath=datapath,
+                          match=match_in,
+                          table_id=i_conf.SECONDARY_TABLE,
+                          priority=i_priority.SWITCH_BCAST,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instruction_bcast_in)
+
+        # Table 2 setup
+        # To prevent loop, all non-matching packets are dropped
+        instruction_norm = [
+            datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                [])]
+        match_norm = ofproto_parser.OFPMatch()
+        self.set_flow(datapath=datapath,
+                      match=match_norm,
+                      table_id=i_conf.SECONDARY_TABLE,
                       priority=i_priority.NORMAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=ofproto.OFPFC_ADD,
@@ -561,13 +595,15 @@ class Inception(app_manager.RyuApp):
         else:
             vm_id = i_util.generate_vm_id(mac, dpid, self.vm_id_slots)
             switch_vmac = self.dpid_to_vmac[dpid]
-            vmac = i_util.create_vm_vmac(switch_vmac, vm_id)
+            tenant_id = self.mac_to_tenant[mac]
+            vmac = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
             if not self.single_dcenter:
                 for rpc_client in self.dcenter_to_rpc.values():
                     rpc_client.update_position(mac, self.dcenter, dpid, port,
                                                vmac)
             self.update_position(mac, self.dcenter, dpid, port, vmac)
 
+        self.set_tenant_filter(dpid, vmac, mac)
         self.set_local_flow(dpid, vmac, mac, port)
 
     def create_failover_log(self, log_type, data_tuple):
@@ -581,8 +617,8 @@ class Inception(app_manager.RyuApp):
         log_path = os.path.join(CONF.zk_failover, log_type)
         self.zk.delete(log_path)
 
-    def set_flow(self, datapath, match, priority, flags, command,
-                 instructions):
+    def set_flow(self, datapath, match=None, table_id=0, priority=0, flags=0,
+                 command=None, instructions=[]):
         """Send OFPFlowMod instruction to datapath"""
 
         parser = datapath.ofproto_parser
@@ -590,6 +626,7 @@ class Inception(app_manager.RyuApp):
             parser.OFPFlowMod(
                 datapath=datapath,
                 match=match,
+                table_id=table_id,
                 priority=priority,
                 flags=flags,
                 command=command,
@@ -627,7 +664,8 @@ class Inception(app_manager.RyuApp):
                 # A new vmac has not been created
                 switch_vmac = self.dpid_to_vmac[dpid_new]
                 vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
-                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+                tenant_id = self.mac_to_tenant[mac]
+                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
             else:
                 # The previous controller crashes after creating vmac_new
                 vmac_new = vmac_record
@@ -642,6 +680,7 @@ class Inception(app_manager.RyuApp):
             rpc_client_old = self.dcenter_to_rpc[dcenter_old]
             rpc_client_old.redirect_local_flow(dpid_old, mac, vmac_old,
                                                vmac_new, self.dcenter)
+            rpc_client_old.del_tenant_filter(dpid_old, mac)
 
             # Redirect gateway flows in peer datacenters towards vmac_old
             # and instruct other controllers to send gratuitous ARP
@@ -660,6 +699,9 @@ class Inception(app_manager.RyuApp):
 
             # Add flow at dpid_new towards vmac_new
             self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            # Add tenant flow of mac at dpid_new
+            self.set_tenant_filter(dpid_new, vmac_new, mac)
+
             LOGGER.info("Add local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_new, mac)
 
@@ -680,7 +722,8 @@ class Inception(app_manager.RyuApp):
             if vmac_record == vmac_old:
                 switch_vmac = self.dpid_to_vmac[dpid_new]
                 vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
-                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id)
+                tenant_id = self.mac_to_tenant[mac]
+                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
             else:
                 # The previous controller crashes after creating vmac_new
                 vmac_new = vmac_record
@@ -700,6 +743,11 @@ class Inception(app_manager.RyuApp):
                         "(mac=%s)", dpid_old, mac)
             # Add flow at dpid_new towards vmac_new
             self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            # Add tenant flow of mac at dpid_new
+            self.set_tenant_filter(dpid_new, vmac_new, mac)
+            # Delete tenant flow of mac at dpid_old
+            self.del_tenant_filter(dpid_old, mac)
+
             LOGGER.info("Add local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_new, mac)
             # send gratuitous ARP to all local sending guests
@@ -722,6 +770,37 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
             return
+
+    def del_tenant_filter(self, dpid, mac):
+        """Delete a tenant filter microflow on a switch (dpid)"""
+        datapath = self.dpset.get(str_to_dpid(dpid))
+        ofproto = datapath.ofproto
+        ofproto_parser = datapath.ofproto_parser
+
+        match = ofproto_parser.OFPMatch(eth_src=mac)
+
+        self.set_flow(datapath=datapath,
+                      match=match,
+                      table_id=i_conf.PRIMARY_TABLE,
+                      command=ofproto.OFPFC_DELETE_STRICT)
+
+    def set_tenant_filter(self, dpid, vmac, mac):
+        """Set up a microflow on a switch (dpid)
+        to only allow intra-tenant unicast"""
+        datapath = self.dpset.get(str_to_dpid(dpid))
+        ofproto = datapath.ofproto
+        ofproto_parser = datapath.ofproto_parser
+
+        match = ofproto_parser.OFPMatch(eth_src=mac,
+                                        eth_dst=(vmac, i_conf.TENANT_MASK))
+        inst = [ofproto_parser.OFPInstructionGotoTable(i_conf.SECONDARY_TABLE)]
+        self.set_flow(datapath=datapath,
+                      match=match,
+                      table_id=i_conf.PRIMARY_TABLE,
+                      priority=i_priority.DATA_FWD_TENANT,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=inst)
 
     def set_local_flow(self, dpid, vmac, mac, port, flow_add=True):
         """Set up a microflow on a switch (dpid) towards a guest (mac)
@@ -747,6 +826,14 @@ class Inception(app_manager.RyuApp):
         match = ofproto_parser.OFPMatch(eth_dst=vmac)
         self.set_flow(datapath=datapath,
                       match=match,
+                      table_id=i_conf.PRIMARY_TABLE,
+                      priority=i_priority.DATA_FWD_LOCAL,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=flow_cmd,
+                      instructions=instructions)
+        self.set_flow(datapath=datapath,
+                      match=match,
+                      table_id=i_conf.SECONDARY_TABLE,
                       priority=i_priority.DATA_FWD_LOCAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=flow_cmd,
@@ -783,6 +870,7 @@ class Inception(app_manager.RyuApp):
         match_src = ofproto_parser.OFPMatch(eth_dst=(mac, mask))
         self.set_flow(datapath=datapath,
                       match=match_src,
+                      table_id=i_conf.SECONDARY_TABLE,
                       priority=priority,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
                       command=flow_cmd,
