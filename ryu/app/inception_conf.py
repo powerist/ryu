@@ -44,7 +44,7 @@ CONF.register_opts([
     cfg.StrOpt('ip_prefix',
                default='192.168',
                help="X1.X2 in your network's IP address X1.X2.X3.X4"),
-    cfg.StrOpt('dcenter',
+    cfg.StrOpt('self_dcenter',
                default='0',
                help="Datacenter identification"),
     cfg.IntOpt('rpc_port',

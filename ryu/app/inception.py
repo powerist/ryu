@@ -57,7 +57,7 @@ CONF.import_opt('zk_data', 'ryu.app.inception_conf')
 CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
-CONF.import_opt('dcenter', 'ryu.app.inception_conf')
+CONF.import_opt('self_dcenter', 'ryu.app.inception_conf')
 CONF.import_opt('rpc_port', 'ryu.app.inception_conf')
 CONF.import_opt('ofp_versions', 'ryu.app.inception_conf')
 CONF.import_opt('peer_dcenters', 'ryu.app.inception_conf')
@@ -119,7 +119,7 @@ class Inception(app_manager.RyuApp):
         self.mac_to_ip = {}
 
         self.gateway = None
-        self.dcenter = CONF.dcenter
+        self.dcenter = CONF.self_dcenter
         # TODO(chen): Store the following two into zookeeper
         # Record switch id assignment
         self.switch_id_slots = [False] * (i_conf.SWITCH_MAXID + 1)
