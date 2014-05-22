@@ -45,7 +45,7 @@ class InceptionArp(object):
         # name shortcuts
         self.zk = inception.zk
         self.dpset = inception.dpset
-        self.dcenter = inception.dcenter
+        self.dcenter_id = inception.dcenter_id
         self.single_dcenter = inception.single_dcenter
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
@@ -85,8 +85,8 @@ class InceptionArp(object):
 
         if not self.single_dcenter:
             for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter)
-        self.update_arp_mapping(src_ip, src_mac, self.dcenter)
+                rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
+        self.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
 
     def update_arp_mapping(self, ip, mac, dcenter):
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
@@ -186,7 +186,7 @@ class InceptionArp(object):
             # Record the communicating guests and time
             timestamp = time.time()
             self.vmac_to_queries[dst_vmac][src_mac] = timestamp
-            if dst_dcenter == self.dcenter:
+            if dst_dcenter == self.dcenter_id:
                 self.vmac_to_queries[src_vmac][dst_mac] = timestamp
 
             # Send arp reply
@@ -240,7 +240,7 @@ class InceptionArp(object):
         timestamp = time.time()
         self.vmac_to_queries[dst_vmac][src_mac] = timestamp
 
-        if dst_dcenter == self.dcenter:
+        if dst_dcenter == self.dcenter_id:
             self.vmac_to_queries[src_vmac][dst_mac] = timestamp
             # An arp reply towards a local server
             self.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
