@@ -59,6 +59,9 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
 
 def parse_tenants(tenant_info, out_sep=';', in_sep=','):
     """Convert string to list of tuples"""
+    if tenant_info == None:
+        return None
+
     tenant_str_list = tenant_info.split(out_sep)
     tenant_list = []
     for tenant_str in tenant_str_list:

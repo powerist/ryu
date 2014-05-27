@@ -131,10 +131,12 @@ class Inception(app_manager.RyuApp):
         self.vm_id_slots = {}
         # Record the tenant information
         self.mac_to_tenant = {}
-        tenant_list = i_util.parse_tenants(CONF.tenant_info)
-        for tenant_id, mac_tuple in enumerate(tenant_list, 1):
-            for mac in mac_tuple:
-                self.mac_to_tenant[mac] = tenant_id
+        self.tenant_list = i_util.parse_tenants(CONF.tenant_info)
+        # TODO(chen): Dynamically assign tenant to macs
+        if self.tenant_list is not None:
+            for tenant_id, mac_tuple in enumerate(self.tenant_list, 1):
+                for mac in mac_tuple:
+                    self.mac_to_tenant[mac] = tenant_id
 
         self.switch_count = 0
         self.switch_maxid = 0
@@ -597,12 +599,17 @@ class Inception(app_manager.RyuApp):
         else:
             vm_id = i_util.generate_vm_id(mac, dpid, self.vm_id_slots)
             switch_vmac = self.dpid_to_vmac[dpid]
-            tenant_id = self.mac_to_tenant[mac]
+            # TODO(chen): Tenant info should be pre-installed
+            if self.tenant_list is None:
+                self.mac_to_tenant[mac] = 1
+                tenant_id = 1
+            else:
+                tenant_id = self.mac_to_tenant[mac]
             vmac = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
             if not self.single_dcenter:
                 for rpc_client in self.dcenter_to_rpc.values():
-                    rpc_client.update_position(mac, self.dcenter_id, dpid, port,
-                                               vmac)
+                    rpc_client.update_position(mac, self.dcenter_id, dpid,
+                                               port, vmac)
             self.update_position(mac, self.dcenter_id, dpid, port, vmac)
 
         self.set_tenant_filter(dpid, vmac, mac)
