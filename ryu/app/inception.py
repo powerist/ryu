@@ -61,6 +61,7 @@ CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
 CONF.import_opt('gateway_dpid', 'ryu.app.inception_conf')
 CONF.import_opt('self_dcenter', 'ryu.app.inception_conf')
 CONF.import_opt('rpc_port', 'ryu.app.inception_conf')
+CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
 CONF.import_opt('ofp_versions', 'ryu.app.inception_conf')
 CONF.import_opt('peer_dcenters', 'ryu.app.inception_conf')
 CONF.import_opt('tenant_info', 'ryu.app.inception_conf')
@@ -626,8 +627,8 @@ class Inception(app_manager.RyuApp):
         log_path = os.path.join(CONF.zk_failover, log_type)
         self.zk.delete(log_path)
 
-    def set_flow(self, datapath, match=None, table_id=0, priority=0, flags=0,
-                 command=None, instructions=[]):
+    def set_flow(self, datapath, match=None, table_id=0, command=None,
+                 priority=0, flags=0, hard_timeout=0, instructions=[]):
         """Send OFPFlowMod instruction to datapath"""
 
         parser = datapath.ofproto_parser
@@ -636,9 +637,10 @@ class Inception(app_manager.RyuApp):
                 datapath=datapath,
                 match=match,
                 table_id=table_id,
+                command=command,
                 priority=priority,
                 flags=flags,
-                command=command,
+                hard_timeout=hard_timeout,
                 instructions=instructions))
 
     def update_position(self, mac, dcenter, dpid, port, vmac):
@@ -701,10 +703,27 @@ class Inception(app_manager.RyuApp):
 
             # Set up flows at gateway to redirect flows bound for
             # old vmac in dcenter_old to new vmac
+            # The flow will expire after ARP cache expires
             ip_new = self.dpid_to_ip[dpid_new]
             gw_fwd_port = self.dpid_to_conns[self.gateway][ip_new]
-            # TODO(chen): When to delete it?
-            self.set_local_flow(self.gateway, vmac_old, vmac_new, gw_fwd_port)
+            datapath_gw = self.dpset.get(str_to_dpid(self.gateway))
+            ofproto = datapath_gw.ofproto
+            ofproto_parser = datapath_gw.ofproto_parser
+            actions = [ofproto_parser.OFPActionSetField(eth_dst=vmac_new),
+                       ofproto_parser.OFPActionOutput(int(gw_fwd_port))]
+            instructions = [
+                datapath_gw.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions)]
+            match_gw = ofproto_parser.OFPMatch(eth_dst=vmac_old)
+            self.set_flow(datapath=datapath_gw,
+                          match=match_gw,
+                          table_id=i_conf.PRIMARY_TABLE,
+                          priority=i_priority.DATA_FWD_LOCAL,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          hard_timeout=CONF.arp_timeout,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instructions)
 
             # Add flow at dpid_new towards vmac_new
             self.set_local_flow(dpid_new, vmac_new, mac, port_new)

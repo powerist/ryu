@@ -15,7 +15,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 from ryu.app import inception_conf as i_conf
-from ryu.lib.dpid import str_to_dpid
 
 
 class InceptionRpc(object):
