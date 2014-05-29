@@ -48,6 +48,7 @@ def extract_ip_addr(ip_prefix, port_name):
 
 def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     """Convert string to dictionary"""
+
     peer_dcs_list = peer_dcenters.split(out_sep)
     peer_dcs_dic = {}
     for peer_dc in peer_dcs_list:

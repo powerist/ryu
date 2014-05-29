@@ -141,14 +141,6 @@ class Inception(app_manager.RyuApp):
 
         self.switch_count = 0
         self.switch_maxid = 0
-        # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
-        if CONF.peer_dcenters is None:
-            self.single_dcenter = True
-            self.dcenter_to_info = {}
-        else:
-            self.single_dcenter = False
-            peer_dcenters = CONF.peer_dcenters
-            self.dcenter_to_info = i_util.parse_peer_dcenters(peer_dcenters)
 
         # Record the dpids on which to install flows to other datacenters
         # when gateway is connected
@@ -157,21 +149,25 @@ class Inception(app_manager.RyuApp):
         self.dpid_to_vmac = {}
         self.dpid_to_topid = {}
 
+        # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
+        self.dcenter_to_info = i_util.parse_peer_dcenters(CONF.peer_dcenters)
+
         ## Inception relevent modules
         # ARP
         self.inception_arp = i_arp.InceptionArp(self)
         # DHCP
         self.inception_dhcp = i_dhcp.InceptionDhcp(self)
+        # RPC
+        self.inception_rpc = i_rpc.InceptionRpc(self)
 
-        self.initiate_cache()
+        # {peer_dc => rpc_client}: Record neighbor datacenter RPC clients info
+        self._setup_rpc_server_clients()
 
-        if not self.single_dcenter:
-            # RPC
-            self.inception_rpc = i_rpc.InceptionRpc(self)
-            self.setup_rpc()
+        self._init_cache()
 
-    def setup_rpc(self):
+    def _setup_rpc_server_clients(self):
         """Set up RPC server and RPC client to other controllers"""
+
         self.dcenter_to_rpc = {}
 
         # RPC server
@@ -190,17 +186,17 @@ class Inception(app_manager.RyuApp):
                                           (controller_ip, CONF.rpc_port))
             self.dcenter_to_rpc[dcenter] = rpc_client
 
-    def initiate_cache(self):
+    def _init_cache(self):
         """Pull network data from Zookeeper during controller boot up"""
-        self.pull_data(i_conf.MAC_TO_POSITION, self.mac_to_position)
-        self.pull_data(i_conf.IP_TO_MAC, self.ip_to_mac)
-        self.pull_data(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
+        self._pull_data(i_conf.MAC_TO_POSITION, self.mac_to_position)
+        self._pull_data(i_conf.IP_TO_MAC, self.ip_to_mac)
+        self._pull_data(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
 
         # Copy data to twin data structure
         for (ip, mac) in self.ip_to_mac.items():
             self.mac_to_ip[mac] = ip
 
-    def pull_data(self, zk_path, local_dic):
+    def _pull_data(self, zk_path, local_dic):
         """Copy all data under zk_path in Zookeeper into local cache"""
         for znode_unicode in self.zk.get_children(zk_path):
             znode = znode_unicode.encode('Latin-1')
@@ -290,8 +286,7 @@ class Inception(app_manager.RyuApp):
             for dpid_pending in self.gateway_waitinglist:
                 gw_fwd_port = self.dpid_to_conns[dpid_pending][gateway_ip]
                 self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
-                                       i_conf.DCENTER_MASK,
-                                       gw_fwd_port)
+                                       i_conf.DCENTER_MASK, gw_fwd_port)
 
     def set_dcenter_flows(self, dpid):
         """Set up flows to other datacenters"""
@@ -304,8 +299,7 @@ class Inception(app_manager.RyuApp):
                     gw_ip = self.dpid_to_ip[self.gateway]
                     gw_fwd_port = self.dpid_to_conns[dpid][gw_ip]
                     self.set_nonlocal_flow(dpid, peer_dc_vmac,
-                                           i_conf.DCENTER_MASK,
-                                           gw_fwd_port)
+                                           i_conf.DCENTER_MASK, gw_fwd_port)
         else:
             # The gateway switch has not connected
             self.gateway_waitinglist.append(dpid)
@@ -607,10 +601,9 @@ class Inception(app_manager.RyuApp):
             else:
                 tenant_id = self.mac_to_tenant[mac]
             vmac = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
-            if not self.single_dcenter:
-                for rpc_client in self.dcenter_to_rpc.values():
-                    rpc_client.update_position(mac, self.dcenter_id, dpid,
-                                               port, vmac)
+            for rpc_client in self.dcenter_to_rpc.values():
+                rpc_client.update_position(mac, self.dcenter_id, dpid,
+                                           port, vmac)
             self.update_position(mac, self.dcenter_id, dpid, port, vmac)
 
         self.set_tenant_filter(dpid, vmac, mac)
@@ -759,10 +752,9 @@ class Inception(app_manager.RyuApp):
             # Store vmac_new
             self.update_position(mac, self.dcenter_id, dpid_new, port_new,
                                  vmac_new)
-            if not self.single_dcenter:
-                for rpc_client in self.dcenter_to_rpc.values():
-                    rpc_client.update_position(mac, self.dcenter_id, dpid_new,
-                                               port_new, vmac_new)
+            for rpc_client in self.dcenter_to_rpc.values():
+                rpc_client.update_position(mac, self.dcenter_id, dpid_new,
+                                           port_new, vmac_new)
             # Instruct dpid_old to redirect traffic
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]
