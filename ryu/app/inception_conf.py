@@ -60,7 +60,7 @@ CONF.register_opts([
                 default=[ofproto_v1_2.OFP_VERSION],
                 help="Default OpenFlow versions to use"),
     cfg.StrOpt('peer_dcenters',
-               default=None,
+               default='',
                help="Neighbor datacenter identification"),
     cfg.BoolOpt('arp_bcast',
                 default=False,

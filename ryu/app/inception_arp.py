@@ -46,15 +46,12 @@ class InceptionArp(object):
         self.zk = inception.zk
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
-        self.single_dcenter = inception.single_dcenter
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
         self.dpid_to_vmac = inception.dpid_to_vmac
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
-        if not self.single_dcenter:
-            self.dcenter_to_rpc = inception.dcenter_to_rpc
 
     def handle(self, dpid, in_port, arp_header):
         LOGGER.info("Handle ARP packet")
@@ -83,9 +80,9 @@ class InceptionArp(object):
             # Duplicate arp learning
             return
 
-        if not self.single_dcenter:
-            for rpc_client in self.dcenter_to_rpc.values():
-                rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
+        for rpc_client in self.inception.dcenter_to_rpc.values():
+            rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
+
         self.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
 
     def update_arp_mapping(self, ip, mac, dcenter):
@@ -172,10 +169,9 @@ class InceptionArp(object):
         if dst_ip not in self.ip_to_mac:
             if CONF.arp_bcast:
                 self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
-                if not self.single_dcenter:
-                    for rpc_client in self.dcenter_to_rpc.values():
-                        rpc_client.broadcast_arp_request(src_ip, src_vmac,
-                                                         dst_ip, dpid)
+                for rpc_client in self.inception.dcenter_to_rpc.values():
+                    rpc_client.broadcast_arp_request(src_ip, src_vmac,
+                                                     dst_ip, dpid)
         else:
             dst_mac = self.ip_to_mac[arp_header.dst_ip]
             dst_dcenter, _, _, dst_vmac = self.mac_to_position[dst_mac]
@@ -247,5 +243,5 @@ class InceptionArp(object):
 
         else:
             # An arp reply towards a remote server in another datacenter
-            rpc_client_dst = self.dcenter_to_rpc[dst_dcenter]
+            rpc_client_dst = self.inception.dcenter_to_rpc[dst_dcenter]
             rpc_client_dst.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
