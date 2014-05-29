@@ -51,7 +51,7 @@ class InceptionRpc(object):
         self.inception.update_position(mac, dcenter, dpid, port, vmac)
 
     def del_tenant_filter(self, dpid, mac):
-        self.inception.del_tenant_filter(dpid, mac)
+        self.inception.flow_manager.del_tenant_filter(dpid, mac)
 
     def redirect_local_flow(self, dpid_old, mac, vmac_old, vmac_new,
                             dcenter_new):

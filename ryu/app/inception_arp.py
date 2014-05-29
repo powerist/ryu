@@ -49,7 +49,6 @@ class InceptionArp(object):
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
-        self.dpid_to_vmac = inception.dpid_to_vmac
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
 

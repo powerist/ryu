@@ -29,7 +29,7 @@ from ryu.app import inception_arp as i_arp
 from ryu.app import inception_conf as i_conf
 from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_rpc as i_rpc
-import ryu.app.inception_priority as i_priority
+from ryu.app import inception_priority as i_priority
 from ryu.app import inception_util as i_util
 from ryu.base import app_manager
 from ryu.controller import dpset
@@ -58,7 +58,8 @@ CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
-CONF.import_opt('gateway_dpid', 'ryu.app.inception_conf')
+CONF.import_opt('gateway_ip', 'ryu.app.inception_conf')
+CONF.import_opt('dhcp_ip', 'ryu.app.inception_conf')
 CONF.import_opt('self_dcenter', 'ryu.app.inception_conf')
 CONF.import_opt('rpc_port', 'ryu.app.inception_conf')
 CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
@@ -68,6 +69,7 @@ CONF.import_opt('tenant_info', 'ryu.app.inception_conf')
 CONF.import_opt('remote_controller', 'ryu.app.inception_conf')
 CONF.import_opt('num_switches', 'ryu.app.inception_conf')
 CONF.import_opt('forwarding_bcast', 'ryu.app.inception_conf')
+CONF.import_opt('multi_tenancy', 'ryu.app.inception_conf')
 
 
 class Inception(app_manager.RyuApp):
@@ -109,12 +111,13 @@ class Inception(app_manager.RyuApp):
         # TODO(chen): gateways have to be stored pairwise
         # if each datacenter has more than one gateways
 
-        # local in-memory caches of network data
-        # TODO(chen): A better way to replace twin dictionaries?
-        self.dpid_to_ip = {}
-        self.ip_to_dpid = {}
+        self.vmac_manager = i_util.VmacManager()
+        self.topology = i_util.Topology()
+        self.flow_manager = i_util.FlowManager(self.dpset,
+                                               CONF.multi_tenancy)
 
         self.dpid_to_conns = defaultdict(dict)
+        # TODO(chen): Seperate vmac from position info
         self.mac_to_position = {}
         # {vmac => {mac => time}}
         # Record guests which queried vmac
@@ -123,13 +126,8 @@ class Inception(app_manager.RyuApp):
         self.ip_to_mac = {}
         self.mac_to_ip = {}
 
-        self.gateway = CONF.gateway_dpid
         self.dcenter_id = CONF.self_dcenter
-        # TODO(chen): Store the following two into zookeeper
-        # Record switch id assignment
-        self.switch_id_slots = [False] * (i_conf.SWITCH_MAXID + 1)
-        # Record vm id assignment of each switch
-        self.vm_id_slots = {}
+        self.vmac_manager.update_dcenter(self.dcenter_id)
         # Record the tenant information
         self.mac_to_tenant = {}
         self.tenant_list = i_util.parse_tenants(CONF.tenant_info)
@@ -145,12 +143,11 @@ class Inception(app_manager.RyuApp):
         # Record the dpids on which to install flows to other datacenters
         # when gateway is connected
         self.gateway_waitinglist = []
-        # Switch virtual MAC
-        self.dpid_to_vmac = {}
-        self.dpid_to_topid = {}
 
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
         self.dcenter_to_info = i_util.parse_peer_dcenters(CONF.peer_dcenters)
+        for dcenter in self.dcenter_to_info:
+            self.vmac_manager.update_dcenter(dcenter)
 
         ## Inception relevent modules
         # ARP
@@ -190,7 +187,8 @@ class Inception(app_manager.RyuApp):
         """Pull network data from Zookeeper during controller boot up"""
         self._pull_data(i_conf.MAC_TO_POSITION, self.mac_to_position)
         self._pull_data(i_conf.IP_TO_MAC, self.ip_to_mac)
-        self._pull_data(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
+        # TODO(chen):
+        #self._pull_data(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
 
         # Copy data to twin data structure
         for (ip, mac) in self.ip_to_mac.items():
@@ -220,146 +218,26 @@ class Inception(app_manager.RyuApp):
             socket = datapath.socket
             ip, _ = socket.getpeername()
 
-            if dpid not in self.vm_id_slots:
-                self.vm_id_slots[dpid] = [False] * (i_conf.VM_MAXID + 1)
-
-            switch_vmac = self.register_switch(dpid, ip)
-            local_ports = self.parse_ports(dpid, ip, switch_vmac, event.ports)
-            if dpid == self.gateway:
-                self.handle_waitinglist(ip)
-            else:
-                self.set_default_flows(datapath, local_ports)
-            self.set_dcenter_flows(dpid)
-            self.do_failover()
-
-        # A switch disconnects
-        else:
-            # TODO(chen): disconnection clean-up
-            # Delete switch's mapping from switch dpid to remote IP address
-            ip = self.dpid_to_ip[dpid]
-            del self.ip_to_dpid[ip]
-            del self.dpid_to_ip[dpid]
-            LOGGER.info("Del: (switch=%s) -> (ip=%s)",
-                        dpid, self.dpid_to_ip[dpid])
-
-            # Delete the switch's all connection info
-            del self.dpid_to_conns[dpid]
-            LOGGER.info("Del: (switch=%s) dpid_to_conns", dpid)
-
-            # Delete all connected guests
-            for mac_addr in self.mac_to_position.keys():
-                _, local_dpid, _, _ = self.mac_to_position[mac_addr]
-                if local_dpid == dpid:
-                    del self.mac_to_position[mac_addr]
-                zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac_addr)
-                zk_data, _ = self.zk.get(zk_path)
-                _, dpid_record, _ = i_util.str_to_tuple(zk_data)
-                if dpid_record == dpid:
-                    self.zk.delete(zk_path)
-            LOGGER.info("Del: (switch=%s) mac_to_position", dpid)
-
-    def register_switch(self, dpid, switch_ip):
-        """Store necessary info of a newly connected switch"""
-        # Update {dpid => switch_vmac}
-        if dpid not in self.dpid_to_vmac:
-            # New connection. Update both zookeeper and local cache
-            dcenter_vmac = i_util.create_dc_vmac(int(self.dcenter_id))
-            switch_vmac = i_util.create_swc_vmac(dcenter_vmac, dpid,
-                                                 self.switch_id_slots)
-            self.dpid_to_vmac[dpid] = switch_vmac
+            # Update topology
+            self.topology.update_switch(dpid, ip, event.ports)
+            # Create new vmac for the new switch
+            switch_vmac = self.vmac_manager.update_switch(self.dcenter_id,
+                                                          dpid)
             zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
             self.zk.create(zk_path_pfx, switch_vmac)
-        else:
-            switch_vmac = self.dpid_to_vmac[dpid]
 
-        # Update {dpid => ip}
-        self.dpid_to_ip[dpid] = switch_ip
-        self.ip_to_dpid[switch_ip] = dpid
-        LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid, switch_ip)
-
-        return switch_vmac
-
-    def handle_waitinglist(self, gateway_ip):
-        """Handle dpid_waitinglist: install dpid-to-remote-datacenter flow"""
-        for dcenter in self.dcenter_to_info:
-            peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-            for dpid_pending in self.gateway_waitinglist:
-                gw_fwd_port = self.dpid_to_conns[dpid_pending][gateway_ip]
-                self.set_nonlocal_flow(dpid_pending, peer_dc_vmac,
-                                       i_conf.DCENTER_MASK, gw_fwd_port)
-
-    def set_dcenter_flows(self, dpid):
-        """Set up flows to other datacenters"""
-        # Switchs connected after gateway: set up flows towards
-        # remote datacenters through gateway
-        if self.gateway is not None:
-            if dpid != self.gateway:
-                for dcenter in self.dcenter_to_info:
-                    peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                    gw_ip = self.dpid_to_ip[self.gateway]
-                    gw_fwd_port = self.dpid_to_conns[dpid][gw_ip]
-                    self.set_nonlocal_flow(dpid, peer_dc_vmac,
-                                           i_conf.DCENTER_MASK, gw_fwd_port)
-        else:
-            # The gateway switch has not connected
-            self.gateway_waitinglist.append(dpid)
-
-    def parse_ports(self, dpid, switch_ip, switch_vmac, ports):
-        """Collect port information.  Sift out ports connecting peer
-        switches and set up necessary flows
-
-        @return: list of ports connecting local guests
-        """
-
-        non_mesh_ports = []
-        for port in ports:
-            # TODO(changbl): Use OVSDB. Parse the port name to get
-            # the IP address of remote host to which the bridge
-            # builds a tunnel (GRE/VXLAN). E.g., obr1_184-53 =>
-            # CONF.ip_prefix.184.53. Only store the port
-            # connecting remote host.
-            # TODO(chen): Better way to store connection info in port name
-            port_no = str(port.port_no)
-            if port.name.startswith('obr') and '_' in port.name:
-                peer_ip = i_util.extract_ip_addr(CONF.ip_prefix, port.name)
-                self.dpid_to_conns[dpid][peer_ip] = port_no
-                LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
-                            dpid, peer_ip, port_no)
-                peer_dpid = self.ip_to_dpid.get(peer_ip)
-
-                # Install switch-to-switch flow
-                if peer_dpid is not None:
-                    peer_vmac = self.dpid_to_vmac[peer_dpid]
-                    peer_fwd_port = self.dpid_to_conns[peer_dpid][switch_ip]
-                    swc_mask = i_conf.SWITCH_MASK
-
-                    self.set_nonlocal_flow(dpid, peer_vmac, swc_mask, port_no)
-                    self.set_nonlocal_flow(peer_dpid, switch_vmac, swc_mask,
-                                           peer_fwd_port)
-
-            elif port.name == CONF.dhcp_port:
-                LOGGER.info("DHCP server is found!")
-                self.inception_dhcp.update_server(dpid, port_no)
-
-            elif port.name.startswith('gate'):
-                _, dcenter = i_util.str_to_tuple(port.name, '_')
-                _, remote_gw_ip = self.dcenter_to_info[dcenter]
-                self.dpid_to_conns[dpid][remote_gw_ip] = port_no
-                LOGGER.info("Inter-datacenter connection:"
-                            "(switch=%s, peer_ip=%s) -> (port=%s)",
-                            dpid, remote_gw_ip, port_no)
-                non_mesh_ports.append(port_no)
-
-                # Install gateway-to-remote-gateway flow
-                peer_dc_vmac = i_util.create_dc_vmac(int(dcenter))
-                self.set_nonlocal_flow(dpid, peer_dc_vmac, i_conf.DCENTER_MASK,
-                                       port_no)
-
+            if self.topology.is_gateway(dpid):
+                self.flow_manager.set_new_gateway_flows(dpid, self.topology,
+                                                        self.vmac_manager)
+                self.flow_manager.handle_waitinglist(dpid, self.topology,
+                                                     self.vmac_manager)
             else:
-                # Store the port connecting local guests
-                non_mesh_ports.append(port_no)
+                self.flow_manager.set_new_switch_flows(dpid, self.topology,
+                                                       self.vmac_manager)
 
-        return non_mesh_ports
+            self.do_failover()
+
+        # TODO(chen): A switch disconnects
 
     def do_failover(self):
         """Do failover"""
@@ -396,131 +274,6 @@ class Inception(app_manager.RyuApp):
             if znode == i_conf.RPC_REDIRECT_FLOW:
                 self.inception_rpc.redirect_local_flow(*data_tuple)
                 self.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
-
-    def set_default_flows(self, datapath, non_mesh_ports):
-        """Set up default flows on a connected switch.
-        Default flows are categarized into two tables:
-        Table 1: tenant filter
-        Table 2: destination-based forwarding
-        """
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
-
-        # Table 1 setup
-        # Set up one flow for ARP messages.
-        # Intercepts all ARP packets and send them to the controller
-        actions_arp = [ofproto_parser.OFPActionOutput(
-            ofproto.OFPP_CONTROLLER,
-            ofproto.OFPCML_NO_BUFFER)]
-        instruction_arp = [datapath.ofproto_parser.OFPInstructionActions(
-            ofproto.OFPIT_APPLY_ACTIONS,
-            actions_arp)]
-        match_arp = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_ARP)
-        self.set_flow(datapath=datapath,
-                      match=match_arp,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.ARP,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_arp)
-        # Set up two flows for DHCP messages
-        actions_dhcp = [ofproto_parser.OFPActionOutput(
-            ofproto.OFPP_CONTROLLER,
-            ofproto.OFPCML_NO_BUFFER)]
-        instruction_dhcp = [datapath.ofproto_parser.OFPInstructionActions(
-            ofproto.OFPIT_APPLY_ACTIONS,
-            actions_dhcp)]
-        match_client = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
-                                               ip_proto=inet.IPPROTO_UDP,
-                                               udp_src=i_dhcp.CLIENT_PORT)
-        match_server = ofproto_parser.OFPMatch(eth_type=ether.ETH_TYPE_IP,
-                                               ip_proto=inet.IPPROTO_UDP,
-                                               udp_src=i_dhcp.SERVER_PORT)
-        # (1) Intercept all DHCP request packets and send to the controller
-        self.set_flow(datapath=datapath,
-                      match=match_client,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.DHCP,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_dhcp)
-        # (2) Intercept all DHCP reply packets and send to the controller
-        self.set_flow(datapath=datapath,
-                      match=match_server,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.DHCP,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_dhcp)
-
-        # To prevent loop, all non-matching packets are dropped
-        instruction_norm = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                [])]
-        match_norm = ofproto_parser.OFPMatch()
-        self.set_flow(datapath=datapath,
-                      match=match_norm,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.NORMAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_norm)
-
-        if CONF.forwarding_bcast:
-            # Set up two parts of flows for broadcast messages
-            # (1) Broadcast messages from each non-mesh port: forward to all
-            # (other) ports
-            actions_bcast_out = [ofproto_parser.OFPActionOutput(
-                                                            ofproto.OFPP_ALL)]
-            instructions_bcast_out = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_bcast_out)]
-            for port_no in non_mesh_ports:
-                match_out = ofproto_parser.OFPMatch(in_port=int(port_no),
-                                                    eth_dst=mac.BROADCAST_STR)
-                self.set_flow(datapath=datapath,
-                              match=match_out,
-                              table_id=i_conf.SECONDARY_TABLE,
-                              priority=i_priority.HOST_BCAST,
-                              flags=ofproto.OFPFF_SEND_FLOW_REM,
-                              command=ofproto.OFPFC_ADD,
-                              instructions=instructions_bcast_out)
-            # (2) Broadcast messages from each (tunnel) port: forward
-            # to all local ports. Since i_priority.SWITCH_BCAST <
-            # i_priority.HOST_BCAST, this guarantees that only
-            # tunnel-port message will trigger this flow
-            actions_bcast_in = [
-                ofproto_parser.OFPActionOutput(port=int(port_no))
-                for port_no in non_mesh_ports]
-            instruction_bcast_in = [
-                ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions_bcast_in)]
-            match_in = ofproto_parser.OFPMatch(eth_dst=mac.BROADCAST_STR)
-            self.set_flow(datapath=datapath,
-                          match=match_in,
-                          table_id=i_conf.SECONDARY_TABLE,
-                          priority=i_priority.SWITCH_BCAST,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_bcast_in)
-
-        # Table 2 setup
-        # To prevent loop, all non-matching packets are dropped
-        instruction_norm = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                [])]
-        match_norm = ofproto_parser.OFPMatch()
-        self.set_flow(datapath=datapath,
-                      match=match_norm,
-                      table_id=i_conf.SECONDARY_TABLE,
-                      priority=i_priority.NORMAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_norm)
 
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
@@ -592,22 +345,23 @@ class Inception(app_manager.RyuApp):
             # vmac exists. Last controller crashes after creating vmac
             _, _, _, vmac = self.mac_to_position[mac]
         else:
-            vm_id = i_util.generate_vm_id(mac, dpid, self.vm_id_slots)
-            switch_vmac = self.dpid_to_vmac[dpid]
+            vm_id = self.vmac_manager.generate_vm_id(mac, dpid)
+            switch_vmac = self.vmac_manager.dpid_to_vmac[dpid]
             # TODO(chen): Tenant info should be pre-installed
             if self.tenant_list is None:
                 self.mac_to_tenant[mac] = 1
                 tenant_id = 1
             else:
                 tenant_id = self.mac_to_tenant[mac]
-            vmac = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
+            vmac = self.vmac_manager.create_vm_vmac(switch_vmac, vm_id,
+                                                    tenant_id)
             for rpc_client in self.dcenter_to_rpc.values():
                 rpc_client.update_position(mac, self.dcenter_id, dpid,
                                            port, vmac)
             self.update_position(mac, self.dcenter_id, dpid, port, vmac)
 
-        self.set_tenant_filter(dpid, vmac, mac)
-        self.set_local_flow(dpid, vmac, mac, port)
+        self.flow_manager.set_tenant_filter(dpid, vmac, mac)
+        self.flow_manager.set_local_flow(dpid, vmac, mac, port)
 
     def create_failover_log(self, log_type, data_tuple):
         # Failover logging
@@ -619,22 +373,6 @@ class Inception(app_manager.RyuApp):
         # Delete failover logging
         log_path = os.path.join(CONF.zk_failover, log_type)
         self.zk.delete(log_path)
-
-    def set_flow(self, datapath, match=None, table_id=0, command=None,
-                 priority=0, flags=0, hard_timeout=0, instructions=[]):
-        """Send OFPFlowMod instruction to datapath"""
-
-        parser = datapath.ofproto_parser
-        datapath.send_msg(
-            parser.OFPFlowMod(
-                datapath=datapath,
-                match=match,
-                table_id=table_id,
-                command=command,
-                priority=priority,
-                flags=flags,
-                hard_timeout=hard_timeout,
-                instructions=instructions))
 
     def update_position(self, mac, dcenter, dpid, port, vmac):
         """Update guest MAC and its connected switch"""
@@ -666,10 +404,11 @@ class Inception(app_manager.RyuApp):
             _, _, _, vmac_record = self.mac_to_position[mac]
             if vmac_record == vmac_old:
                 # A new vmac has not been created
-                switch_vmac = self.dpid_to_vmac[dpid_new]
-                vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
+                switch_vmac = self.vmac_manager.dpid_to_vmac[dpid_new]
+                vm_id = self.vmac_manager.generate_vm_id(mac, dpid_new)
                 tenant_id = self.mac_to_tenant[mac]
-                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
+                vmac_new = self.vmac_manager.create_vm_vmac(switch_vmac, vm_id,
+                                                            tenant_id)
             else:
                 # The previous controller crashes after creating vmac_new
                 vmac_new = vmac_record
@@ -719,9 +458,9 @@ class Inception(app_manager.RyuApp):
                           instructions=instructions)
 
             # Add flow at dpid_new towards vmac_new
-            self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            self.flow_manager.set_local_flow(dpid_new, vmac_new, mac, port_new)
             # Add tenant flow of mac at dpid_new
-            self.set_tenant_filter(dpid_new, vmac_new, mac)
+            self.flow_manager.set_tenant_filter(dpid_new, vmac_new, mac)
 
             LOGGER.info("Add local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_new, mac)
@@ -741,10 +480,11 @@ class Inception(app_manager.RyuApp):
             # Install/Update a new flow at dpid_new towards mac
             _, _, _, vmac_record = self.mac_to_position[mac]
             if vmac_record == vmac_old:
-                switch_vmac = self.dpid_to_vmac[dpid_new]
-                vm_id = i_util.generate_vm_id(mac, dpid_new, self.vm_id_slots)
+                switch_vmac = self.vmac_manager.dpid_to_vmac[dpid_new]
+                vm_id = self.vmac_manager.generate_vm_id(mac, dpid_new)
                 tenant_id = self.mac_to_tenant[mac]
-                vmac_new = i_util.create_vm_vmac(switch_vmac, vm_id, tenant_id)
+                vmac_new = self.vmac_manager.create_vm_vmac(switch_vmac, vm_id,
+                                                            tenant_id)
             else:
                 # The previous controller crashes after creating vmac_new
                 vmac_new = vmac_record
@@ -758,15 +498,16 @@ class Inception(app_manager.RyuApp):
             # Instruct dpid_old to redirect traffic
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]
-            self.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port, False)
+            self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
+                                             fwd_port, False)
             LOGGER.info("Redirect forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_old, mac)
             # Add flow at dpid_new towards vmac_new
-            self.set_local_flow(dpid_new, vmac_new, mac, port_new)
+            self.flow_manager.set_local_flow(dpid_new, vmac_new, mac, port_new)
             # Add tenant flow of mac at dpid_new
-            self.set_tenant_filter(dpid_new, vmac_new, mac)
+            self.flow_manager.set_tenant_filter(dpid_new, vmac_new, mac)
             # Delete tenant flow of mac at dpid_old
-            self.del_tenant_filter(dpid_old, mac)
+            self.flow_manager.del_tenant_filter(dpid_old, mac)
 
             LOGGER.info("Add local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_new, mac)
@@ -786,120 +527,8 @@ class Inception(app_manager.RyuApp):
             ip_new = self.dpid_to_ip[dpid_new]
             fwd_port = self.dpid_to_conns[dpid_old][ip_new]
 
-            self.set_local_flow(dpid_old, vmac_old, mac, fwd_port, False)
+            self.flow_manager.set_local_flow(dpid_old, vmac_old, mac, fwd_port,
+                                             False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
             return
-
-    def del_tenant_filter(self, dpid, mac):
-        """Delete a tenant filter microflow on a switch (dpid)"""
-        datapath = self.dpset.get(str_to_dpid(dpid))
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
-
-        match = ofproto_parser.OFPMatch(eth_src=mac)
-
-        self.set_flow(datapath=datapath,
-                      match=match,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      command=ofproto.OFPFC_DELETE_STRICT)
-
-    def set_tenant_filter(self, dpid, vmac, mac):
-        """Set up a microflow on a switch (dpid)
-        to only allow intra-tenant unicast"""
-        datapath = self.dpset.get(str_to_dpid(dpid))
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
-
-        match = ofproto_parser.OFPMatch(eth_src=mac,
-                                        eth_dst=(vmac, i_conf.TENANT_MASK))
-        inst = [ofproto_parser.OFPInstructionGotoTable(i_conf.SECONDARY_TABLE)]
-        self.set_flow(datapath=datapath,
-                      match=match,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.DATA_FWD_TENANT,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=inst)
-
-    def set_local_flow(self, dpid, vmac, mac, port, flow_add=True):
-        """Set up a microflow on a switch (dpid) towards a guest (mac)
-        The rule matches on dst vmac, rewrites it to mac and forwards to
-        the appropriate port.
-        mac can be another vmac.
-        """
-        datapath = self.dpset.get(str_to_dpid(dpid))
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
-
-        if flow_add:
-            flow_cmd = ofproto.OFPFC_ADD
-        else:
-            flow_cmd = ofproto.OFPFC_MODIFY_STRICT
-
-        actions = [ofproto_parser.OFPActionSetField(eth_dst=mac),
-                   ofproto_parser.OFPActionOutput(int(port))]
-        instructions = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions)]
-        match = ofproto_parser.OFPMatch(eth_dst=vmac)
-        self.set_flow(datapath=datapath,
-                      match=match,
-                      table_id=i_conf.PRIMARY_TABLE,
-                      priority=i_priority.DATA_FWD_LOCAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=flow_cmd,
-                      instructions=instructions)
-        self.set_flow(datapath=datapath,
-                      match=match,
-                      table_id=i_conf.SECONDARY_TABLE,
-                      priority=i_priority.DATA_FWD_LOCAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=flow_cmd,
-                      instructions=instructions)
-
-    def set_nonlocal_flow(self, dpid, mac, mask, port, flow_add=True):
-        """Set up a microflow for unicast on switch DPID towards MAC
-
-        @param flow_add: Boolean value.
-            True: flow is added;
-            False: flow is modified.
-        """
-        if mask == i_conf.DCENTER_MASK:
-            mac_record = i_util.get_dc_prefix(mac)
-            priority = i_priority.DATA_FWD_DCENTER
-        else:
-            mac_record = i_util.get_swc_prefix(mac)
-            priority = i_priority.DATA_FWD_SWITCH
-
-        datapath = self.dpset.get(str_to_dpid(dpid))
-        ofproto = datapath.ofproto
-        ofproto_parser = datapath.ofproto_parser
-
-        if dpid == self.gateway:
-            table_id = i_conf.PRIMARY_TABLE
-        else:
-            table_id = i_conf.SECONDARY_TABLE
-
-        if flow_add:
-            flow_cmd = ofproto.OFPFC_ADD
-        else:
-            flow_cmd = ofproto.OFPFC_MODIFY_STRICT
-
-        actions = [ofproto_parser.OFPActionOutput(int(port))]
-        instructions_src = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions)]
-        match_src = ofproto_parser.OFPMatch(eth_dst=(mac, mask))
-        self.set_flow(datapath=datapath,
-                      match=match_src,
-                      table_id=table_id,
-                      priority=priority,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=flow_cmd,
-                      instructions=instructions_src)
-
-        LOGGER.info("Setup forward flow on (switch=%s) towards (mac=%s)",
-                    dpid, mac_record)

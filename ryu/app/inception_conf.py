@@ -44,9 +44,18 @@ CONF.register_opts([
     cfg.StrOpt('dhcp_port',
                default='eth_dhcpp',
                help="Port name of dhcp port"),
-    cfg.StrOpt('gateway_dpid',
+    cfg.StrOpt('gateway_ip',
                default=None,
-               help="Gateway datapath id"),
+               help="IP address of the physical machine hosting gateway"),
+    cfg.StrOpt('dhcp_ip',
+               default=None,
+               help="IP address of the physical machine hosting dhcp server"),
+    cfg.StrOpt('intradcenter_port_prefix',
+               default="obr",
+               help="String prefix of port_name, meaning intradcenter port"),
+    cfg.StrOpt('interdcenter_port_prefix',
+               default="gateway",
+               help="String prefix of port_name, meaning intradcenter port"),
     cfg.StrOpt('ip_prefix',
                default='192.168',
                help="X1.X2 in your network's IP address X1.X2.X3.X4"),
@@ -60,11 +69,14 @@ CONF.register_opts([
                 default=[ofproto_v1_2.OFP_VERSION],
                 help="Default OpenFlow versions to use"),
     cfg.StrOpt('peer_dcenters',
-               default='',
+               default=None,
                help="Neighbor datacenter identification"),
     cfg.BoolOpt('arp_bcast',
                 default=False,
                 help='Allow/Disallow ARP broadcast'),
+    cfg.BoolOpt('multi_tenancy',
+                default=False,
+                help='Allow/Disallow multi-tenancy'),
     cfg.BoolOpt('forwarding_bcast',
                 default=False,
                 help='Allow/Disallow all-to-all broadcast'),
@@ -110,12 +122,6 @@ its virtual "MAC" address.
 """
 DPID_TO_VMAC = os.path.join(CONF.zk_data, 'dpid_to_vmac')
 
-DCENTER_MASK = "ff:ff:00:00:00:00"
-SWITCH_MASK = "ff:ff:ff:ff:00:00"
-TENANT_MASK = "00:00:00:00:00:ff"
-SWITCH_MAXID = 65535
-VM_MAXID = 65535
-
 # Failover type
 MIGRATION = "migration"
 SOURCE_LEARNING = "source_learning"
@@ -123,6 +129,3 @@ ARP_LEARNING = "arp_learning"
 RPC_REDIRECT_FLOW = "rpc_redirect_flow"
 RPC_GATEWAY_FLOW = "rpc_gateway_flow"
 
-# Table id
-PRIMARY_TABLE = 0
-SECONDARY_TABLE = 1
