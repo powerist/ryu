@@ -69,6 +69,7 @@ CONF.import_opt('tenant_info', 'ryu.app.inception_conf')
 CONF.import_opt('remote_controller', 'ryu.app.inception_conf')
 CONF.import_opt('num_switches', 'ryu.app.inception_conf')
 CONF.import_opt('forwarding_bcast', 'ryu.app.inception_conf')
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 CONF.import_opt('multi_tenancy', 'ryu.app.inception_conf')
 
 
@@ -85,31 +86,6 @@ class Inception(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(Inception, self).__init__(*args, **kwargs)
         self.dpset = kwargs['dpset']
-
-        # all network data (in the form of dict) is stored in ZooKeeper
-        # TODO(chen): Add watcher to ZooKeeper for multi-active controllers
-        # TODO(chen): Pull all data from zookeeper to local cache
-        zk_logger = logging.getLogger('kazoo')
-        zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
-        zk_logger.setLevel(zk_log_level)
-        zk_console_handler = logging.StreamHandler()
-        zk_console_handler.setLevel(zk_log_level)
-        zk_console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
-        zk_logger.addHandler(zk_console_handler)
-        self.zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
-        self.zk.start()
-
-        # ensure all paths in ZooKeeper
-        self.zk.ensure_path(CONF.zk_data)
-        self.zk.ensure_path(CONF.zk_failover)
-        # TODO(chen): Very strange to have a topology view with DPID and IP
-        # mixed. Try to hide the IPs and only present connections between
-        # DPIDs.
-        self.zk.ensure_path(i_conf.MAC_TO_POSITION)
-        self.zk.ensure_path(i_conf.IP_TO_MAC)
-        self.zk.ensure_path(i_conf.DPID_TO_VMAC)
-        # TODO(chen): gateways have to be stored pairwise
-        # if each datacenter has more than one gateways
 
         self.vmac_manager = i_util.VmacManager()
         self.topology = i_util.Topology()
@@ -160,7 +136,27 @@ class Inception(app_manager.RyuApp):
         # {peer_dc => rpc_client}: Record neighbor datacenter RPC clients info
         self._setup_rpc_server_clients()
 
-        self._init_cache()
+        if CONF.zookeeper_storage:
+            self.zookeeper_init()
+            self._init_cache()
+
+    def zookeeper_init(self):
+        """Initiate zookeeper storage"""
+        zk_logger = logging.getLogger('kazoo')
+        zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
+        zk_logger.setLevel(zk_log_level)
+        zk_console_handler = logging.StreamHandler()
+        zk_console_handler.setLevel(zk_log_level)
+        zk_console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
+        zk_logger.addHandler(zk_console_handler)
+        self.zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
+        self.zk.start()
+
+        self.zk.ensure_path(CONF.zk_data)
+        self.zk.ensure_path(CONF.zk_failover)
+        self.zk.ensure_path(i_conf.MAC_TO_POSITION)
+        self.zk.ensure_path(i_conf.IP_TO_MAC)
+        self.zk.ensure_path(i_conf.DPID_TO_VMAC)
 
     def _setup_rpc_server_clients(self):
         """Set up RPC server and RPC client to other controllers"""
@@ -223,8 +219,9 @@ class Inception(app_manager.RyuApp):
             # Create new vmac for the new switch
             switch_vmac = self.vmac_manager.update_switch(self.dcenter_id,
                                                           dpid)
-            zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
-            self.zk.create(zk_path_pfx, switch_vmac)
+            if CONF.zookeeper_storage:
+                zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
+                self.zk.create(zk_path_pfx, switch_vmac)
 
             if self.topology.is_gateway(dpid):
                 self.flow_manager.set_new_gateway_flows(dpid, self.topology,
@@ -241,6 +238,9 @@ class Inception(app_manager.RyuApp):
 
     def do_failover(self):
         """Do failover"""
+        if not CONF.zookeeper_storage:
+            return
+
         if self.switch_count == CONF.num_switches:
             self._do_failover()
 
@@ -320,9 +320,11 @@ class Inception(app_manager.RyuApp):
         if ethernet_src not in self.mac_to_position:
             # New VM
             log_tuple = (dpid, in_port, ethernet_src)
-            self.create_failover_log(i_conf.SOURCE_LEARNING, log_tuple)
+            if CONF.zookeeper_storage:
+                self.create_failover_log(i_conf.SOURCE_LEARNING, log_tuple)
             self.learn_new_vm(dpid, in_port, ethernet_src)
-            self.delete_failover_log(i_conf.SOURCE_LEARNING)
+            if CONF.zookeeper_storage:
+                self.delete_failover_log(i_conf.SOURCE_LEARNING)
         else:
             position = self.mac_to_position[ethernet_src]
             dcenter_old, dpid_old, port_old, vmac = position
@@ -333,10 +335,12 @@ class Inception(app_manager.RyuApp):
             # The guest's switch changes, e.g., due to a VM migration
             log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
                          dpid, in_port)
-            self.create_failover_log(i_conf.MIGRATION, log_tuple)
+            if CONF.zookeeper_storage:
+                self.create_failover_log(i_conf.MIGRATION, log_tuple)
             self.handle_migration(ethernet_src, dcenter_old, dpid_old,
                                   port_old, vmac, dpid, in_port)
-            self.delete_failover_log(i_conf.MIGRATION)
+            if CONF.zookeeper_storage:
+                self.delete_failover_log(i_conf.MIGRATION)
 
     def learn_new_vm(self, dpid, port, mac):
         """Create vmac for new vm; Store vm position info;
@@ -385,10 +389,11 @@ class Inception(app_manager.RyuApp):
 
         zk_data = i_util.tuple_to_str((dcenter, dpid, port, vmac))
         zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
-        if mac in self.mac_to_position:
-            self.zk.set(zk_path, zk_data)
-        else:
-            self.zk.create(zk_path, zk_data)
+        if CONF.zookeeper_storage:
+            if mac in self.mac_to_position:
+                self.zk.set(zk_path, zk_data)
+            else:
+                self.zk.create(zk_path, zk_data)
         self.mac_to_position[mac] = (dcenter, dpid, port, vmac)
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s,"
                     "vmac=%s)", mac, dcenter, dpid, port, vmac)
