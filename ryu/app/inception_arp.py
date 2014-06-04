@@ -34,6 +34,7 @@ LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.import_opt('arp_bcast', 'ryu.app.inception_conf')
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 
 
 class InceptionArp(object):
@@ -43,15 +44,15 @@ class InceptionArp(object):
         self.inception = inception
 
         # name shortcuts
-        self.zk = inception.zk
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
-        self.dpid_to_vmac = inception.dpid_to_vmac
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
+        if CONF.zookeeper_storage:
+            self.zk = inception.zk
 
     def handle(self, dpid, in_port, arp_header):
         LOGGER.info("Handle ARP packet")
@@ -87,10 +88,11 @@ class InceptionArp(object):
 
     def update_arp_mapping(self, ip, mac, dcenter):
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-        if ip in self.ip_to_mac:
-            self.zk.set_data(zk_path_ip, mac)
-        else:
-            self.zk.create(zk_path_ip, mac)
+        if CONF.zookeeper_storage:
+            if ip in self.ip_to_mac:
+                self.zk.set_data(zk_path_ip, mac)
+            else:
+                self.zk.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
         self.mac_to_ip[mac] = ip
         LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",

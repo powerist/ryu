@@ -39,11 +39,11 @@ class InceptionDhcp(object):
         self.switch_port = None
 
         # name shortcuts
-        self.zk = inception.zk
         self.dpset = inception.dpset
         self.mac_to_position = inception.mac_to_position
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
+
 
     def update_server(self, dpid, port):
         if self.switch_dpid is not None and self.switch_port is not None:
