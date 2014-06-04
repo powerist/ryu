@@ -14,7 +14,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
 from ryu.app import inception_conf as i_conf
 
 
@@ -25,7 +24,6 @@ class InceptionRpc(object):
         self.inception = inception
 
         # name shortcuts
-        self.zk = inception.zk
         self.mac_to_position = self.inception.mac_to_position
         self.mac_to_ip = self.inception.mac_to_ip
         self.dpid_to_conns = self.inception.dpid_to_conns
