@@ -63,9 +63,11 @@ class InceptionArp(object):
 
         # Do {IP => MAC} learning
         log_tuple = (src_ip, src_mac)
-        self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
+        if CONF.zookeeper_storage:
+            self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
         self.do_arp_learning(src_ip, src_mac)
-        self.inception.delete_failover_log(i_conf.ARP_LEARNING)
+        if CONF.zookeeper_storage:
+            self.inception.delete_failover_log(i_conf.ARP_LEARNING)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
             self._handle_arp_request(dpid, in_port, arp_header)

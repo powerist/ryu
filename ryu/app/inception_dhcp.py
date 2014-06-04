@@ -18,12 +18,17 @@
 import logging
 import os
 
+from oslo.config import cfg
+
 from ryu.lib.dpid import str_to_dpid
 
 from ryu.lib.packet import dhcp
 from ryu.app import inception_conf as i_conf
 
 LOGGER = logging.getLogger(__name__)
+
+CONF = cfg.CONF
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 
 SERVER_PORT = 67
 CLIENT_PORT = 68
@@ -43,7 +48,8 @@ class InceptionDhcp(object):
         self.mac_to_position = inception.mac_to_position
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
-
+        if CONF.zookeeper_storage:
+            self.zk = inception.zk
 
     def update_server(self, dpid, port):
         if self.switch_dpid is not None and self.switch_port is not None:
@@ -70,8 +76,9 @@ class InceptionDhcp(object):
                     if ip_addr not in self.ip_to_mac:
                         self.ip_to_mac[ip_addr] = mac_addr
                         self.mac_to_ip[mac_addr] = ip_addr
-                        zk_path = os.path.join(i_conf.IP_TO_MAC, ip_addr)
-                        self.zk.create(zk_path, mac_addr)
+                        if CONF.zookeeper_storage:
+                            zk_path = os.path.join(i_conf.IP_TO_MAC, ip_addr)
+                            self.zk.create(zk_path, mac_addr)
                 break
 
         # A packet received from client. Find out the switch connected
