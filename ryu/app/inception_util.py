@@ -14,6 +14,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
+"""Inception utilities"""
+
 from collections import defaultdict
 import logging
 
@@ -30,13 +33,13 @@ LOGGER = logging.getLogger(__name__)
 CONF = cfg.CONF
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('gateway_ip', 'ryu.app.inception_conf')
+CONF.import_opt('dhcp_ip', 'ryu.app.inception_conf')
+CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
 CONF.import_opt('interdcenter_port_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('intradcenter_port_prefix', 'ryu.app.inception_conf')
 
-"""Inception utilities"""
 
-
-class Topology:
+class Topology(object):
     """
     Build switch level topology of Inception network.
     Gateway is assumed to have no local VMs connected.
@@ -53,13 +56,15 @@ class Topology:
         # TOOD(chen): multiple gateways
         self.gateway = None
         self.dhcp_switch = None
+        self.dhcp_port = None
         # {local dpid -> {remote ip -> local port}}
         self.dpid_ip_to_port = defaultdict(dict)
         # {local ip -> local dpid}
         self.ip_to_dpid = {}
 
     def update_switch(self, dpid_new, ip_new, ports):
-        """Update topology"""
+        """Update switch topology"""
+
         self.ip_to_dpid[ip_new] = dpid_new
         LOGGER.info("Add: (switch=%s) -> (ip=%s)", dpid_new, ip_new)
         self.parse_switch_ports(dpid_new, ip_new, ports)
@@ -67,15 +72,19 @@ class Topology:
             self.dhcp_switch = dpid_new
         if ip_new == CONF.gateway_ip:
             self.gateway = dpid_new
+            LOGGER.info("Gateway switch: (ip=%s), (dpid=%s)", ip_new,
+                        self.gateway)
 
     def parse_switch_ports(self, dpid, ip, switch_ports):
         """Parse port name to extract connection information"""
+
         local_port_prefix = CONF.intradcenter_port_prefix
         remote_port_prefix = CONF.interdcenter_port_prefix
         for port in switch_ports:
             port_no = str(port.port_no)
+
+            # Port_name: e.g., "obr_<ip_prefix>"
             if port.name.startswith(local_port_prefix) and '_' in port.name:
-                # Port_name: obr_(ip prefix)
                 peer_ip = self.extract_ip_addr(CONF.ip_prefix, port.name)
                 LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                             dpid, peer_ip, port_no)
@@ -91,15 +100,18 @@ class Topology:
                     # Store the port_no until peer_ip is connected
                     self.dpid_ip_to_port[dpid][peer_ip] = port_no
 
+            # Port_name: e.g., "gateway_<dcenter_id>"
             elif port.name.startswith(remote_port_prefix):
-                # Port_name: gateway_(dcenter id)
                 peer_dcenter = self.extract_dcenter(port.name)
                 port_no = port.port_no
-                self.gateway_to_dcenters[dpid].append((peer_dcenter,
-                                                       port_no))
+                self.gateway_to_dcenters[dpid].append((peer_dcenter, port_no))
                 LOGGER.info("New inter-datacenter connection:"
                             "(gateway=%s) -> (datacenter=%s)",
                             dpid, peer_dcenter)
+
+            # Port name matches DHCP port
+            if port.name == CONF.dhcp_port:
+                self.dhcp_port = port.port_no
 
     def extract_ip_addr(self, ip_prefix, port_name):
         """Extract IP address from port name"""
@@ -117,20 +129,20 @@ class Topology:
 
     def gateway_connected(self):
         """Check if any gateway is connected or not"""
-        if self.gateway is None:
-            return False
 
-        return True
+        return self.gateway is not None
 
     def is_gateway(self, dpid):
         """Check if dpid is gateway"""
-        if self.gateway == dpid:
-            return True
 
-        return False
+        return dpid == self.gateway
 
+    def is_dhcp(self, dpid):
+        """Check if dpid is dhcp server"""
 
-class VmacManager:
+        return dpid == self.dhcp_switch
+
+class VmacManager(object):
     """
     Manage vmacs of VMs, switches and datacenters
     """
@@ -236,7 +248,7 @@ class VmacManager:
         return vmac[:5]
 
 
-class FlowManager:
+class FlowManager(object):
     """Handle flow installation/uninstallation"""
 
     # Table id
@@ -528,11 +540,12 @@ def str_to_tuple(data_string, sep=','):
 
 def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     """Convert string to dictionary"""
-    if peer_dcenters is None:
-        return {}
+
+    peer_dcs_dic = {}
+    if not peer_dcenters:
+        return peer_dcs_dic
 
     peer_dcs_list = peer_dcenters.split(out_sep)
-    peer_dcs_dic = {}
     for peer_dc in peer_dcs_list:
         peer_list = peer_dc.split(in_sep)
         peer_dcs_dic[peer_list[0]] = (peer_list[1], peer_list[2])
@@ -542,11 +555,12 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
 
 def parse_tenants(tenant_info, out_sep=';', in_sep=','):
     """Convert string to list of tuples"""
-    if tenant_info == None:
-        return None
+
+    tenant_list = []
+    if not tenant_info:
+        return tenant_list
 
     tenant_str_list = tenant_info.split(out_sep)
-    tenant_list = []
     for tenant_str in tenant_str_list:
         mac_list = tenant_str.split(in_sep)
         mac_tuple = tuple(mac_list)

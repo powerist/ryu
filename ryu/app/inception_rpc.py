@@ -33,10 +33,12 @@ class InceptionRpc(object):
 
     def setup_inter_dcenter_flows(self, local_mac, remote_mac):
         """Set up flows towards gateway switch"""
+
         self.inception.setup_inter_dcenter_flows(local_mac, remote_mac)
 
     def update_arp_mapping(self, ip, mac, dcenter):
         """Update remote ip_mac mapping"""
+
         self.inception_arp.update_arp_mapping(ip, mac, dcenter)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
@@ -93,6 +95,7 @@ class InceptionRpc(object):
     def set_gateway_flow(self, mac, vmac_old, vmac_new, dcenter_new):
         """Update gateway flow to rewrite an out-of-date vmac_old and
         forward accordingly, and update old local ARP caches"""
+
         # Failover logging
         log_tuple = (mac, vmac_old, vmac_new, dcenter_new)
         self.inception.create_failover_log(i_conf.RPC_GATEWAY_FLOW, log_tuple)

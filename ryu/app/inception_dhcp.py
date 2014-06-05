@@ -57,6 +57,7 @@ class InceptionDhcp(object):
 
         self.switch_dpid = dpid
         self.switch_port = port
+        LOGGER.info("DHCP server: (dpid=%s), (port=%s)", dpid, port)
 
     def handle(self, dhcp_header, raw_data):
         # Process DHCP packet
