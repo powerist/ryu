@@ -51,6 +51,7 @@ class InceptionArp(object):
         self.dpid_to_conns = inception.dpid_to_conns
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
+
         if CONF.zookeeper_storage:
             self.zk = inception.zk
 
@@ -79,6 +80,7 @@ class InceptionArp(object):
         """Learn IP => MAC mapping from a received ARP packet, update
         ip_to_mac and mac_to_ip table.
         """
+
         if (src_ip, src_mac) in self.ip_to_mac.items():
             # Duplicate arp learning
             return
