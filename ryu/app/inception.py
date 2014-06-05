@@ -23,6 +23,7 @@ import socket
 from xmlrpclib import ServerProxy
 
 from kazoo import client
+from kazoo import exceptions as kazoo_exc
 from oslo.config import cfg
 
 from ryu.app import inception_arp as i_arp
@@ -216,7 +217,11 @@ class Inception(app_manager.RyuApp):
                                                           dpid)
             if CONF.zookeeper_storage:
                 zk_path_pfx = os.path.join(i_conf.DPID_TO_VMAC, dpid)
-                self.zk.create(zk_path_pfx, switch_vmac)
+                try:
+                    self.zk.create(zk_path_pfx, switch_vmac)
+                except kazoo_exc.NodeExistsError:
+                    LOGGER.info("Switch (dpid=%s) data already there, "
+                                 "dkip creation", dpid)
 
             if self.topology.is_gateway(dpid):
                 self.flow_manager.set_new_gateway_flows(dpid, self.topology,
