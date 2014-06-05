@@ -52,9 +52,6 @@ class InceptionArp(object):
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
 
-        if CONF.zookeeper_storage:
-            self.zk = inception.zk
-
     def handle(self, dpid, in_port, arp_header):
         LOGGER.info("Handle ARP packet")
 
@@ -94,9 +91,9 @@ class InceptionArp(object):
         zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
         if CONF.zookeeper_storage:
             if ip in self.ip_to_mac:
-                self.zk.set_data(zk_path_ip, mac)
+                self.inception.zk.set_data(zk_path_ip, mac)
             else:
-                self.zk.create(zk_path_ip, mac)
+                self.inception.zk.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
         self.mac_to_ip[mac] = ip
         LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
