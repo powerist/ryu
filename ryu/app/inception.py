@@ -25,6 +25,7 @@ from xmlrpclib import ServerProxy
 from kazoo import client
 from kazoo import exceptions as kazoo_exc
 from oslo.config import cfg
+import traceback
 
 from ryu.app import inception_arp as i_arp
 from ryu.app import inception_conf as i_conf
@@ -279,14 +280,17 @@ class Inception(app_manager.RyuApp):
     def packet_in_handler(self, event):
         """Handle when a packet is received."""
 
-        msg = event.msg
-        datapath = msg.datapath
-        dpid = dpid_to_str(datapath.id)
-        in_port = str(msg.match['in_port'])
+        try:
+            msg = event.msg
+            datapath = msg.datapath
+            dpid = dpid_to_str(datapath.id)
+            in_port = str(msg.match['in_port'])
 
-        # TODO(chen): Now we assume VMs are registered during DHCP and
-        # gratuitous ARP during boot-up.
-        self._process_packet_in(dpid, in_port, msg.data)
+            # TODO(chen): Now we assume VMs are registered during DHCP and
+            # gratuitous ARP during boot-up.
+            self._process_packet_in(dpid, in_port, msg.data)
+        except Exception:
+            LOGGER.info("Unexpected exception: %s", traceback.format_exc())
 
     def _process_packet_in(self, dpid, in_port, data):
         """Process raw data received from dpid through in_port."""
@@ -335,15 +339,16 @@ class Inception(app_manager.RyuApp):
                 # No migration
                 return False
 
-            # The guest's switch changes, e.g., due to a VM migration
-            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
-                         dpid, in_port)
-            if CONF.zookeeper_storage:
-                self.create_failover_log(i_conf.MIGRATION, log_tuple)
-            self.handle_migration(ethernet_src, dcenter_old, dpid_old,
-                                  port_old, vmac, dpid, in_port)
-            if CONF.zookeeper_storage:
-                self.delete_failover_log(i_conf.MIGRATION)
+            # TODO: tmp comment out migration module
+#            # The guest's switch changes, e.g., due to a VM migration
+#            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
+#                         dpid, in_port)
+#            if CONF.zookeeper_storage:
+#                self.create_failover_log(i_conf.MIGRATION, log_tuple)
+#            self.handle_migration(ethernet_src, dcenter_old, dpid_old,
+#                                  port_old, vmac, dpid, in_port)
+#            if CONF.zookeeper_storage:
+#                self.delete_failover_log(i_conf.MIGRATION)
 
     def learn_new_vm(self, dpid, port, mac):
         """Create vmac for new vm; Store vm position info;
