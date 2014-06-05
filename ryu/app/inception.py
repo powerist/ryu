@@ -290,7 +290,8 @@ class Inception(app_manager.RyuApp):
             # gratuitous ARP during boot-up.
             self._process_packet_in(dpid, in_port, msg.data)
         except Exception:
-            LOGGER.info("Unexpected exception: %s", traceback.format_exc())
+            LOGGER.warning("Unexpected exception in packet handler %s",
+                           traceback.format_exc())
 
     def _process_packet_in(self, dpid, in_port, data):
         """Process raw data received from dpid through in_port."""
@@ -299,24 +300,31 @@ class Inception(app_manager.RyuApp):
         ethernet_header = whole_packet.get_protocol(ethernet.ethernet)
         ethernet_src = ethernet_header.src
 
-        # do source learning
-        self._do_source_learning(dpid, in_port, ethernet_src)
-        # handle ARP packet if it is
-        if ethernet_header.ethertype == ether.ETH_TYPE_ARP:
-            arp_header = whole_packet.get_protocol(arp.arp)
-            self.inception_arp.handle(dpid, in_port, arp_header)
-        # handle DHCP packet if it is
-        if ethernet_header.ethertype == ether.ETH_TYPE_IP:
-            ip_header = whole_packet.get_protocol(ipv4.ipv4)
-            if ip_header.proto == inet.IPPROTO_UDP:
-                udp_header = whole_packet.get_protocol(udp.udp)
-                if udp_header.src_port in (i_dhcp.CLIENT_PORT,
-                                           i_dhcp.SERVER_PORT):
-                    # Parsing DHCP packet
-                    # TODO(chen): RYU does not parse DHCP now.
-                    dhcp_binary = whole_packet.protocols[-1]
-                    dhcp_header, _, _ = dhcp.dhcp.parser(dhcp_binary)
-                    self.inception_dhcp.handle(dhcp_header, data)
+        try:
+            # do source learning
+            self._do_source_learning(dpid, in_port, ethernet_src)
+            # handle ARP packet if it is
+            if ethernet_header.ethertype == ether.ETH_TYPE_ARP:
+                arp_header = whole_packet.get_protocol(arp.arp)
+                self.inception_arp.handle(dpid, in_port, arp_header)
+            # handle DHCP packet if it is
+            if ethernet_header.ethertype == ether.ETH_TYPE_IP:
+                ip_header = whole_packet.get_protocol(ipv4.ipv4)
+                if ip_header.proto == inet.IPPROTO_UDP:
+                    udp_header = whole_packet.get_protocol(udp.udp)
+                    if udp_header.src_port in (i_dhcp.CLIENT_PORT,
+                                               i_dhcp.SERVER_PORT):
+                        # Parsing DHCP packet
+                        # TODO(chen): RYU does not parse DHCP now.
+                        dhcp_binary = whole_packet.protocols[-1]
+                        dhcp_header, _, _ = dhcp.dhcp.parser(dhcp_binary)
+                        self.inception_dhcp.handle(dhcp_header, data)
+        except Exception:
+            LOGGER.warning("Unexpected exception in packet processing: %s",
+                           traceback.format_exc())
+            LOGGER.warn("whole_packet=%s", whole_packet)
+            LOGGER.warn("ethernet_header=%s", ethernet_header)
+            LOGGER.warn("ethernet_src=%s", ethernet_src)
 
     def _do_source_learning(self, dpid, in_port, ethernet_src):
         """Learn MAC => (switch dpid, switch port) mapping from a packet,
@@ -339,16 +347,14 @@ class Inception(app_manager.RyuApp):
                 # No migration
                 return False
 
-            # TODO: tmp comment out migration module
-#            # The guest's switch changes, e.g., due to a VM migration
-#            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
-#                         dpid, in_port)
-#            if CONF.zookeeper_storage:
-#                self.create_failover_log(i_conf.MIGRATION, log_tuple)
-#            self.handle_migration(ethernet_src, dcenter_old, dpid_old,
-#                                  port_old, vmac, dpid, in_port)
-#            if CONF.zookeeper_storage:
-#                self.delete_failover_log(i_conf.MIGRATION)
+            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, vmac,
+                         dpid, in_port)
+            if CONF.zookeeper_storage:
+                self.create_failover_log(i_conf.MIGRATION, log_tuple)
+            self.handle_migration(ethernet_src, dcenter_old, dpid_old,
+                                  port_old, vmac, dpid, in_port)
+            if CONF.zookeeper_storage:
+                self.delete_failover_log(i_conf.MIGRATION)
 
     def learn_new_vm(self, dpid, port, mac):
         """Create vmac for new vm; Store vm position info;
