@@ -48,8 +48,6 @@ class InceptionDhcp(object):
         self.mac_to_position = inception.mac_to_position
         self.ip_to_mac = inception.ip_to_mac
         self.mac_to_ip = inception.mac_to_ip
-        if CONF.zookeeper_storage:
-            self.zk = inception.zk
 
     def update_server(self, dpid, port):
         if self.switch_dpid is not None and self.switch_port is not None:
@@ -79,7 +77,7 @@ class InceptionDhcp(object):
                         self.mac_to_ip[mac_addr] = ip_addr
                         if CONF.zookeeper_storage:
                             zk_path = os.path.join(i_conf.IP_TO_MAC, ip_addr)
-                            self.zk.create(zk_path, mac_addr)
+                            self.inception.zk.create(zk_path, mac_addr)
                 break
 
         # A packet received from client. Find out the switch connected
