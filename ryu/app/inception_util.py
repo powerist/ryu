@@ -142,6 +142,7 @@ class Topology(object):
 
         return dpid == self.dhcp_switch
 
+
 class VmacManager(object):
     """
     Manage vmacs of VMs, switches and datacenters
@@ -280,6 +281,7 @@ class FlowManager(object):
 
     def set_new_gateway_flows(self, dpid_gw, topology, vmac_manager):
         """Set up flows when a new gateway(dpid) is connected"""
+        self.set_default_flows(dpid_gw)
         self.set_interswitch_flows(dpid_gw, topology, vmac_manager)
         self.set_gateway_dcenter_flows(dpid_gw, topology, vmac_manager)
         self.handle_waitinglist(dpid_gw, topology, vmac_manager)
@@ -342,6 +344,25 @@ class FlowManager(object):
 
         LOGGER.info("New forward flow: (switch=%s) -> (mac=%s, mask=%s)",
                     dpid, mac, mask)
+
+    def set_drop_flow(self, dpid, table_id=0):
+        """Set up a flow to drop all packets that do not match any flow"""
+        datapath = self.dpset.get(str_to_dpid(dpid))
+        ofproto = datapath.ofproto
+        ofproto_parser = datapath.ofproto_parser
+
+        instruction_norm = [
+            datapath.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                [])]
+        match_norm = ofproto_parser.OFPMatch()
+        self.set_flow(datapath=datapath,
+                      match=match_norm,
+                      table_id=table_id,
+                      priority=i_priority.NORMAL,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instruction_norm)
 
     def set_flow(self, datapath, match=None, table_id=0, command=None,
                  priority=0, flags=0, hard_timeout=0, instructions=[]):
@@ -417,34 +438,12 @@ class FlowManager(object):
                       instructions=instruction_dhcp)
 
         # To prevent loop, all non-matching packets are dropped
-        instruction_norm = [
-            datapath.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                [])]
-        match_norm = ofproto_parser.OFPMatch()
-        self.set_flow(datapath=datapath,
-                      match=match_norm,
-                      table_id=FlowManager.PRIMARY_TABLE,
-                      priority=i_priority.NORMAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instruction_norm)
+        self.set_drop_flow(dpid)
 
         # Table 2 setup for multi-tenancy
         # To prevent loop, all non-matching packets are dropped
         if self.multi_tenancy:
-            instruction_norm = [
-                datapath.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    [])]
-            match_norm = ofproto_parser.OFPMatch()
-            self.set_flow(datapath=datapath,
-                          match=match_norm,
-                          table_id=FlowManager.SECONDARY_TABLE,
-                          priority=i_priority.NORMAL,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instruction_norm)
+            self.set_drop_flow(dpid, table_id=FlowManager.SECONDARY_TABLE)
 
     def del_tenant_filter(self, dpid, mac):
         """Delete a tenant filter microflow on a switch (dpid)"""
