@@ -59,6 +59,7 @@ CONF.register_cli_opts([
                     help='application module name to run')
 ])
 
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
 CONF.import_opt('zk_election', 'ryu.app.inception_conf')
 
@@ -80,12 +81,17 @@ def main():
     log.init_log()
     LOGGER.info('config_file=%s', config_file)
 
-    LOGGER.info('ZooKeeper servers=%s', CONF.zk_servers)
-    zk = KazooClient(hosts=CONF.zk_servers, logger=LOGGER)
-    zk.start()
-    election = zk.Election(CONF.zk_election)
-    LOGGER.info('Contending to be the leader...')
-    election.run(real_main)
+    # if using zookeeper backend storage, use it for leader election
+    if CONF.zookeeper_storage:
+        LOGGER.info('ZooKeeper servers=%s', CONF.zk_servers)
+        zk = KazooClient(hosts=CONF.zk_servers, logger=LOGGER)
+        zk.start()
+        election = zk.Election(CONF.zk_election)
+        LOGGER.info('Contending to be the leader...')
+        election.run(real_main)
+    # otherwise, directly run real main function
+    else:
+        real_main()
 
 def real_main():
     LOGGER.info('I win leader election, Ryu controller start running')
