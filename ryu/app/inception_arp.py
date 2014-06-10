@@ -16,7 +16,6 @@
 #    under the License.
 
 import logging
-import os
 import time
 
 from oslo.config import cfg
@@ -46,9 +45,8 @@ class InceptionArp(object):
         # name shortcuts
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
-        self.ip_to_mac = inception.ip_to_mac
-        self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
+        self.ip_to_mac = inception.ip_to_mac
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
 
@@ -63,7 +61,7 @@ class InceptionArp(object):
         log_tuple = (src_ip, src_mac)
         if CONF.zookeeper_storage:
             self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
-        self.do_arp_learning(src_ip, src_mac)
+        self.inception.do_arp_learning(src_ip, src_mac)
         if CONF.zookeeper_storage:
             self.inception.delete_failover_log(i_conf.ARP_LEARNING)
         # Process ARP request
@@ -72,32 +70,6 @@ class InceptionArp(object):
         # Process ARP reply
         elif arp_header.opcode == arp.ARP_REPLY:
             self._handle_arp_reply(arp_header)
-
-    def do_arp_learning(self, src_ip, src_mac):
-        """Learn IP => MAC mapping from a received ARP packet, update
-        ip_to_mac and mac_to_ip table.
-        """
-
-        if (src_ip, src_mac) in self.ip_to_mac.items():
-            # Duplicate arp learning
-            return
-
-        for rpc_client in self.inception.dcenter_to_rpc.values():
-            rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
-
-        self.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
-
-    def update_arp_mapping(self, ip, mac, dcenter):
-        zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-        if CONF.zookeeper_storage:
-            if ip in self.ip_to_mac:
-                self.inception.zk.set_data(zk_path_ip, mac)
-            else:
-                self.inception.zk.create(zk_path_ip, mac)
-        self.ip_to_mac[ip] = mac
-        self.mac_to_ip[mac] = ip
-        LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
-                    ip, mac, dcenter)
 
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         """

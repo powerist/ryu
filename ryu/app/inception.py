@@ -556,3 +556,29 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
             return
+
+    def do_arp_learning(self, src_ip, src_mac):
+        """Learn IP => MAC mapping from a received ARP packet, update
+        ip_to_mac and mac_to_ip table.
+        """
+        if (src_ip, src_mac) in self.ip_to_mac.items():
+            # Duplicate arp learning
+            return
+
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
+
+        self.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
+
+    def update_arp_mapping(self, ip, mac, dcenter):
+        """Update IP => MAC mapping"""
+        if CONF.zookeeper_storage:
+            zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
+            if ip in self.ip_to_mac:
+                self.zk.set_data(zk_path_ip, mac)
+            else:
+                self.zk.create(zk_path_ip, mac)
+        self.ip_to_mac[ip] = mac
+        self.mac_to_ip[mac] = ip
+        LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
+                    ip, mac, dcenter)

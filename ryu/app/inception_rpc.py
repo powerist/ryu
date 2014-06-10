@@ -39,7 +39,7 @@ class InceptionRpc(object):
     def update_arp_mapping(self, ip, mac, dcenter):
         """Update remote ip_mac mapping"""
 
-        self.inception_arp.update_arp_mapping(ip, mac, dcenter)
+        self.inception.update_arp_mapping(ip, mac, dcenter)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         self.inception_arp.send_arp_reply(src_ip, src_mac, dst_ip, dst_mac)

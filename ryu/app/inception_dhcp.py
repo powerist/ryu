@@ -73,11 +73,7 @@ class InceptionDhcp(object):
                     ip_addr = dhcp_header.yiaddr
                     mac_addr = dhcp_header.chaddr
                     if ip_addr not in self.ip_to_mac:
-                        self.ip_to_mac[ip_addr] = mac_addr
-                        self.mac_to_ip[mac_addr] = ip_addr
-                        if CONF.zookeeper_storage:
-                            zk_path = os.path.join(i_conf.IP_TO_MAC, ip_addr)
-                            self.inception.zk.create(zk_path, mac_addr)
+                        self.inception.do_arp_learning(ip_addr, mac_addr)
                 break
 
         # A packet received from client. Find out the switch connected
