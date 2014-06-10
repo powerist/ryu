@@ -230,7 +230,7 @@ class VmacManager(object):
         switch_suffix = ("%02x:%02x:00:00" % (switch_high, switch_low))
         return ':'.join((dcenter_prefix, switch_suffix))
 
-    def create_vm_vmac(self, switch_vmac, vm_id, tenant_id):
+    def create_vm_vmac(self, vm_mac, switch_vmac, vm_id, tenant_id):
         """Generate virtual MAC address of a VM"""
 
         switch_prefix = self.get_swc_prefix(switch_vmac)
@@ -238,7 +238,12 @@ class VmacManager(object):
         vm_id_suffix = "%02x" % vm_id_hex
         tenant_id_hex = tenant_id & 0xff
         tenant_id_suffix = "%02x" % tenant_id_hex
-        return ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
+        vmac = ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
+        self.mac_to_vmac[vm_mac] = vmac
+        return vmac
+
+    def update_vm_vmac(self, mac, vmac):
+        self.mac_to_vmac[mac] = vmac
 
     def get_swc_prefix(self, vmac):
         """Extract switch prefix from virtual MAC address"""

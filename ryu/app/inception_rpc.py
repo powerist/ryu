@@ -24,7 +24,6 @@ class InceptionRpc(object):
         self.inception = inception
 
         # name shortcuts
-        self.mac_to_position = self.inception.mac_to_position
         self.arp_mapping = inception.arp_mapping
         self.dpid_to_conns = self.inception.dpid_to_conns
         self.dcenter_to_info = self.inception.dcenter_to_info
@@ -47,8 +46,11 @@ class InceptionRpc(object):
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         self.inception_arp.broadcast_arp_request(src_ip, src_mac, dst_ip, dpid)
 
-    def update_position(self, mac, dcenter, dpid, port, vmac):
-        self.inception.update_position(mac, dcenter, dpid, port, vmac)
+    def update_position(self, mac, dcenter, dpid, port):
+        self.inception.update_position(mac, dcenter, dpid, port)
+
+    def update_vmac(self, mac, vmac):
+        self.inception.vmac_manager.update_vm_vmac(mac, vmac)
 
     def del_tenant_filter(self, dpid, mac):
         self.inception.flow_manager.del_tenant_filter(dpid, mac)

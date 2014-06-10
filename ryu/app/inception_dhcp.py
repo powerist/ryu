@@ -94,7 +94,7 @@ class InceptionDhcp(object):
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
         elif dhcp_header.op == dhcp.DHCP_BOOT_REPLY:
-            _, dpid, port, _ = self.mac_to_position[dhcp_header.chaddr]
+            _, dpid, port = self.mac_to_position[dhcp_header.chaddr]
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s, port=%s)",
                         dhcp_header.chaddr, dpid, port)
