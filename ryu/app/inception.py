@@ -89,6 +89,7 @@ class Inception(app_manager.RyuApp):
         self.vmac_manager = i_util.VmacManager()
         self.topology = i_util.Topology()
         self.flow_manager = i_util.FlowManager(self.dpset, CONF.multi_tenancy)
+        self.arp_mapping = i_util.ArpMapping()
 
         self.dpid_to_conns = defaultdict(dict)
         # TODO(chen): Seperate vmac from position info
@@ -97,8 +98,6 @@ class Inception(app_manager.RyuApp):
         # Record guests which queried vmac
         # TODO(chen): Store data in Zookeeper
         self.vmac_to_queries = defaultdict(dict)
-        self.ip_to_mac = {}
-        self.mac_to_ip = {}
 
         self.dcenter_id = CONF.self_dcenter
         self.vmac_manager.update_dcenter(self.dcenter_id)
@@ -173,17 +172,11 @@ class Inception(app_manager.RyuApp):
         self.zk.ensure_path(CONF.zk_data)
         self.zk.ensure_path(CONF.zk_failover)
         self.zk.ensure_path(i_conf.MAC_TO_POSITION)
-        self.zk.ensure_path(i_conf.IP_TO_MAC)
         self.zk.ensure_path(i_conf.DPID_TO_VMAC)
 
         self._load_data_entry(i_conf.MAC_TO_POSITION, self.mac_to_position)
-        self._load_data_entry(i_conf.IP_TO_MAC, self.ip_to_mac)
         # TODO(chen):
         #self._load_data_entry(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
-
-        # Copy data to twin data structure
-        for (ip, mac) in self.ip_to_mac.items():
-            self.mac_to_ip[mac] = ip
 
     def _load_data_entry(self, zk_path, local_dic):
         """Copy all data under zk_path in Zookeeper into local cache"""
@@ -492,8 +485,8 @@ class Inception(app_manager.RyuApp):
             # send gratuitous ARP to all local sending guests
             # TODO(chen): Only within ARP entry timeout
             for mac_query in self.vmac_to_queries[vmac_old]:
-                ip = self.mac_to_ip[mac]
-                ip_query = self.mac_to_ip[mac_query]
+                ip = self.arp_mapping.get_ip(mac)
+                ip_query = self.arp_mapping.get_ip(mac_query)
                 self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
                                                   mac_query)
             del self.vmac_to_queries[vmac_old]
@@ -538,8 +531,8 @@ class Inception(app_manager.RyuApp):
             # send gratuitous ARP to all local sending guests
             # TODO(chen): Only within ARP entry timeout
             for mac_query in self.vmac_to_queries[vmac_old]:
-                ip = self.mac_to_ip[mac]
-                ip_query = self.mac_to_ip[mac_query]
+                ip = self.arp_mapping.get_ip(mac)
+                ip_query = self.arp_mapping.get_ip(mac_query)
                 self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
                                                   mac_query)
             del self.vmac_to_queries[vmac_old]
@@ -561,7 +554,7 @@ class Inception(app_manager.RyuApp):
         """Learn IP => MAC mapping from a received ARP packet, update
         ip_to_mac and mac_to_ip table.
         """
-        if (src_ip, src_mac) in self.ip_to_mac.items():
+        if self.arp_mapping.mapping_exist(src_ip):
             # Duplicate arp learning
             return
 
@@ -574,11 +567,10 @@ class Inception(app_manager.RyuApp):
         """Update IP => MAC mapping"""
         if CONF.zookeeper_storage:
             zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-            if ip in self.ip_to_mac:
+            if self.arp_mapping.mapping_exist(ip):
                 self.zk.set_data(zk_path_ip, mac)
             else:
                 self.zk.create(zk_path_ip, mac)
-        self.ip_to_mac[ip] = mac
-        self.mac_to_ip[mac] = ip
+        self.arp_mapping.update_mapping(ip, mac)
         LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
                     ip, mac, dcenter)

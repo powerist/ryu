@@ -25,7 +25,7 @@ class InceptionRpc(object):
 
         # name shortcuts
         self.mac_to_position = self.inception.mac_to_position
-        self.mac_to_ip = self.inception.mac_to_ip
+        self.arp_mapping = inception.arp_mapping
         self.dpid_to_conns = self.inception.dpid_to_conns
         self.dcenter_to_info = self.inception.dcenter_to_info
         self.vmac_to_queries = self.inception.vmac_to_queries
@@ -84,8 +84,8 @@ class InceptionRpc(object):
         # send gratuitous ARP to all local sending guests
         # TODO(chen): Only within ARP entry timeout
         for mac_query in self.vmac_to_queries[vmac_old]:
-            ip = self.mac_to_ip[mac]
-            ip_query = self.mac_to_ip[mac_query]
+            ip = self.arp_mapping.get_ip(mac)
+            ip_query = self.arp_mapping.get_ip(mac_query)
             self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
                                               mac_query)
         del self.vmac_to_queries[vmac_old]
@@ -117,8 +117,8 @@ class InceptionRpc(object):
 
         # Send gratuitous arp to all guests that have done ARP requests to mac
         for mac_query in self.vmac_to_queries[vmac_old]:
-            ip_query = self.mac_to_ip[mac_query]
-            ip = self.mac_to_ip[mac]
+            ip = self.arp_mapping.get_ip(mac)
+            ip_query = self.arp_mapping.get_ip(mac_query)
             self.send_arp_reply(ip, vmac_new, ip_query, mac_query)
         del self.vmac_to_queries[vmac_old]
 

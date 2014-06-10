@@ -523,6 +523,30 @@ class FlowManager(object):
                           instructions=instructions)
 
 
+class ArpMapping(object):
+    """Maintain IP <=> MAC mapping"""
+    def __init__(self):
+        self.ip_to_mac = {}
+        self.mac_to_ip = {}
+
+    def update_mapping(self, ip, mac):
+        self.ip_to_mac[ip] = mac
+        self.mac_to_ip[mac] = ip
+
+    def del_mapping(self, ip, mac):
+        del self.ip_to_mac[ip]
+        del self.mac_to_ip[mac]
+
+    def get_ip(self, mac):
+        return self.mac_to_ip[mac]
+
+    def get_mac(self, ip):
+        return self.ip_to_mac[ip]
+
+    def mapping_exist(self, ip):
+        return (ip in self.ip_to_mac)
+
+
 def tuple_to_str(data_tuple, sep=','):
     """Convert tuple to string."""
 

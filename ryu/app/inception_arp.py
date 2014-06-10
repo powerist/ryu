@@ -46,7 +46,7 @@ class InceptionArp(object):
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
         self.dpid_to_conns = inception.dpid_to_conns
-        self.ip_to_mac = inception.ip_to_mac
+        self.arp_mapping = inception.arp_mapping
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
 
@@ -78,7 +78,7 @@ class InceptionArp(object):
 
         @param dpid: datapath issuing arp request
         """
-        if dst_ip not in self.ip_to_mac:
+        if not self.arp_mapping.mapping_exist(dst_ip):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                         dst_ip)
 
@@ -108,7 +108,6 @@ class InceptionArp(object):
                         in_port=ofproto.OFPP_LOCAL,
                         data=packet_request.data,
                         actions=actions_ports))
-        #TODO: why do we need this "else" part?
         else:
             # ARP entry found in local table
             # TODO: Return arp reply
@@ -141,14 +140,14 @@ class InceptionArp(object):
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
         _, _, _, src_vmac = self.mac_to_position[src_mac]
-        if dst_ip not in self.ip_to_mac:
+        if not self.arp_mapping.mapping_exist(dst_ip):
             if CONF.arp_bcast:
                 self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
                 for rpc_client in self.inception.dcenter_to_rpc.values():
                     rpc_client.broadcast_arp_request(src_ip, src_vmac,
                                                      dst_ip, dpid)
         else:
-            dst_mac = self.ip_to_mac[arp_header.dst_ip]
+            dst_mac = self.arp_mapping.get_mac(arp_header.dst_ip)
             dst_dcenter, _, _, dst_vmac = self.mac_to_position[dst_mac]
 
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
@@ -203,7 +202,7 @@ class InceptionArp(object):
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
-        dst_mac = self.ip_to_mac[dst_ip]
+        dst_mac = self.arp_mapping.get_mac(dst_ip)
         dst_dcenter, _, _, _ = self.mac_to_position[dst_mac]
         _, _, _, src_vmac = self.mac_to_position[src_mac]
 
