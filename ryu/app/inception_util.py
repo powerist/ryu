@@ -240,10 +240,12 @@ class VmacManager(object):
         tenant_id_suffix = "%02x" % tenant_id_hex
         vmac = ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
         self.mac_to_vmac[vm_mac] = vmac
+        LOGGER.info("Update: (mac=%s) => (vmac=%s)", vm_mac, vmac)
         return vmac
 
     def update_vm_vmac(self, mac, vmac):
         self.mac_to_vmac[mac] = vmac
+        LOGGER.info("Update: (mac=%s) => (vmac=%s)", mac, vmac)
 
     def get_swc_prefix(self, vmac):
         """Extract switch prefix from virtual MAC address"""
@@ -528,6 +530,46 @@ class FlowManager(object):
                           instructions=instructions)
 
 
+class TenantManager(object):
+    """Manage tenant information"""
+    DEFAULT_TENANT_ID = 1
+
+    def __init__(self, mac_to_tenant={}):
+        self.mac_to_tenant = mac_to_tenant
+
+    @classmethod
+    def tenant_from_string(cls, tenant_info):
+        """Create an instance of TenantManager from argument of type string"""
+        tenant_list = cls.parse_tenants(tenant_info)
+        mac_to_tenant = {}
+        if tenant_list:
+            for tenant_id, mac_tuple in enumerate(tenant_list, 1):
+                for mac in mac_tuple:
+                    mac_to_tenant[mac] = tenant_id
+        tenant_manager = cls(mac_to_tenant)
+        return tenant_manager
+
+    def parse_tenants(self, tenant_info, out_sep=';', in_sep=','):
+        """Convert string to list of tuples"""
+
+        tenant_list = []
+        if tenant_info == "":
+            return tenant_list
+
+        tenant_str_list = tenant_info.split(out_sep)
+        for tenant_str in tenant_str_list:
+            mac_list = tenant_str.split(in_sep)
+            mac_tuple = tuple(mac_list)
+            tenant_list.append(mac_tuple)
+
+        return tenant_list
+
+    def get_tenant_id(self, mac):
+        if self.mac_to_tenant:
+            return self.mac_to_tenant[mac]
+        else:
+            return TenantManager.DEFAULT_TENANT_ID
+
 class ArpMapping(object):
     """Maintain IP <=> MAC mapping"""
     def __init__(self):
@@ -581,17 +623,4 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
     return peer_dcs_dic
 
 
-def parse_tenants(tenant_info, out_sep=';', in_sep=','):
-    """Convert string to list of tuples"""
 
-    tenant_list = []
-    if not tenant_info:
-        return tenant_list
-
-    tenant_str_list = tenant_info.split(out_sep)
-    for tenant_str in tenant_str_list:
-        mac_list = tenant_str.split(in_sep)
-        mac_tuple = tuple(mac_list)
-        tenant_list.append(mac_tuple)
-
-    return tenant_list

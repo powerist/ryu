@@ -89,6 +89,7 @@ class Inception(app_manager.RyuApp):
         self.vmac_manager = i_util.VmacManager()
         self.topology = i_util.Topology()
         self.flow_manager = i_util.FlowManager(self.dpset, CONF.multi_tenancy)
+        self.tenant_manager = i_util.TenantManager(CONF.tenant_info)
         self.arp_mapping = i_util.ArpMapping()
 
         self.dpid_to_conns = defaultdict(dict)
@@ -101,13 +102,6 @@ class Inception(app_manager.RyuApp):
 
         self.dcenter_id = CONF.self_dcenter
         self.vmac_manager.update_dcenter(self.dcenter_id)
-        # Record the tenant information
-        self.mac_to_tenant = {}
-        self.tenant_list = i_util.parse_tenants(CONF.tenant_info)
-        # TODO(chen): Dynamically assign tenant to macs
-        for tenant_id, mac_tuple in enumerate(self.tenant_list, 1):
-            for mac in mac_tuple:
-                self.mac_to_tenant[mac] = tenant_id
 
         self.switch_count = 0
         self.switch_maxid = 0
@@ -356,12 +350,7 @@ class Inception(app_manager.RyuApp):
         else:
             vm_id = self.vmac_manager.generate_vm_id(mac, dpid)
             switch_vmac = self.vmac_manager.dpid_to_vmac[dpid]
-            # TODO(chen): Tenant info should be pre-installed
-            if not self.tenant_list:
-                self.mac_to_tenant[mac] = 1
-                tenant_id = 1
-            else:
-                tenant_id = self.mac_to_tenant[mac]
+            tenant_id = self.tenant_manager.get_tenant_id(mac)
             vmac = self.vmac_manager.create_vm_vmac(mac, switch_vmac, vm_id,
                                                     tenant_id)
             for rpc_client in self.dcenter_to_rpc.values():
@@ -421,7 +410,7 @@ class Inception(app_manager.RyuApp):
                 # A new vmac has not been created
                 switch_vmac = self.vmac_manager.dpid_to_vmac[dpid_new]
                 vm_id = self.vmac_manager.generate_vm_id(mac, dpid_new)
-                tenant_id = self.mac_to_tenant[mac]
+                tenant_id = self.tenant_manager.get_tenant_id(mac)
                 vmac_new = self.vmac_manager.create_vm_vmac(mac, switch_vmac,
                                                             vm_id, tenant_id)
             else:
@@ -497,7 +486,7 @@ class Inception(app_manager.RyuApp):
             if vmac_record == vmac_old:
                 switch_vmac = self.vmac_manager.dpid_to_vmac[dpid_new]
                 vm_id = self.vmac_manager.generate_vm_id(mac, dpid_new)
-                tenant_id = self.mac_to_tenant[mac]
+                tenant_id = self.tenant_manager.get_tenant_id(mac)
                 vmac_new = self.vmac_manager.create_vm_vmac(mac, switch_vmac,
                                                             vm_id, tenant_id)
             else:
