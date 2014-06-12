@@ -16,7 +16,6 @@
 #    under the License.
 
 import logging
-import os
 import time
 
 from oslo.config import cfg
@@ -46,9 +45,9 @@ class InceptionArp(object):
         # name shortcuts
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
-        self.ip_to_mac = inception.ip_to_mac
-        self.mac_to_ip = inception.mac_to_ip
         self.dpid_to_conns = inception.dpid_to_conns
+        self.arp_mapping = inception.arp_mapping
+        self.vmac_manager = inception.vmac_manager
         self.mac_to_position = inception.mac_to_position
         self.vmac_to_queries = inception.vmac_to_queries
 
@@ -63,7 +62,7 @@ class InceptionArp(object):
         log_tuple = (src_ip, src_mac)
         if CONF.zookeeper_storage:
             self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
-        self.do_arp_learning(src_ip, src_mac)
+        self.inception.do_arp_learning(src_ip, src_mac)
         if CONF.zookeeper_storage:
             self.inception.delete_failover_log(i_conf.ARP_LEARNING)
         # Process ARP request
@@ -73,32 +72,6 @@ class InceptionArp(object):
         elif arp_header.opcode == arp.ARP_REPLY:
             self._handle_arp_reply(arp_header)
 
-    def do_arp_learning(self, src_ip, src_mac):
-        """Learn IP => MAC mapping from a received ARP packet, update
-        ip_to_mac and mac_to_ip table.
-        """
-
-        if (src_ip, src_mac) in self.ip_to_mac.items():
-            # Duplicate arp learning
-            return
-
-        for rpc_client in self.inception.dcenter_to_rpc.values():
-            rpc_client.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
-
-        self.update_arp_mapping(src_ip, src_mac, self.dcenter_id)
-
-    def update_arp_mapping(self, ip, mac, dcenter):
-        zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-        if CONF.zookeeper_storage:
-            if ip in self.ip_to_mac:
-                self.inception.zk.set_data(zk_path_ip, mac)
-            else:
-                self.inception.zk.create(zk_path_ip, mac)
-        self.ip_to_mac[ip] = mac
-        self.mac_to_ip[mac] = ip
-        LOGGER.info("Update: (ip=%s) => (mac=%s, dcenter=%s)",
-                    ip, mac, dcenter)
-
     def broadcast_arp_request(self, src_ip, src_mac, dst_ip, dpid):
         """
         Construct an ARP request and broadcast it if no record is found to
@@ -106,7 +79,7 @@ class InceptionArp(object):
 
         @param dpid: datapath issuing arp request
         """
-        if dst_ip not in self.ip_to_mac:
+        if not self.arp_mapping.mapping_exist(dst_ip):
             LOGGER.info("Entry for (ip=%s) not found, broadcast ARP request",
                         dst_ip)
 
@@ -136,7 +109,6 @@ class InceptionArp(object):
                         in_port=ofproto.OFPP_LOCAL,
                         data=packet_request.data,
                         actions=actions_ports))
-        #TODO: why do we need this "else" part?
         else:
             # ARP entry found in local table
             # TODO: Return arp reply
@@ -168,16 +140,17 @@ class InceptionArp(object):
         dst_ip = arp_header.dst_ip
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
-        _, _, _, src_vmac = self.mac_to_position[src_mac]
-        if dst_ip not in self.ip_to_mac:
+        src_vmac = self.vmac_manager.mac_to_vmac[src_mac]
+        if not self.arp_mapping.mapping_exist(dst_ip):
             if CONF.arp_bcast:
                 self.broadcast_arp_request(src_ip, src_vmac, dst_ip, dpid)
                 for rpc_client in self.inception.dcenter_to_rpc.values():
                     rpc_client.broadcast_arp_request(src_ip, src_vmac,
                                                      dst_ip, dpid)
         else:
-            dst_mac = self.ip_to_mac[arp_header.dst_ip]
-            dst_dcenter, _, _, dst_vmac = self.mac_to_position[dst_mac]
+            dst_mac = self.arp_mapping.get_mac(arp_header.dst_ip)
+            dst_vmac = self.vmac_manager.mac_to_vmac[dst_mac]
+            dst_dcenter, _, _ = self.mac_to_position[dst_mac]
 
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
                         dst_ip, dst_mac, dst_vmac)
@@ -203,7 +176,7 @@ class InceptionArp(object):
         """
         if dst_mac in self.mac_to_position:
             # If I know to whom to forward back this ARP reply
-            _, dst_dpid, dst_port, _ = self.mac_to_position[dst_mac]
+            _, dst_dpid, dst_port = self.mac_to_position[dst_mac]
             # Forward ARP reply
             packet_reply = self.create_arp_packet(src_mac, dst_mac, dst_ip,
                                                   src_ip, arp.ARP_REPLY)
@@ -231,9 +204,9 @@ class InceptionArp(object):
 
         LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
 
-        dst_mac = self.ip_to_mac[dst_ip]
-        dst_dcenter, _, _, _ = self.mac_to_position[dst_mac]
-        _, _, _, src_vmac = self.mac_to_position[src_mac]
+        dst_mac = self.arp_mapping.get_mac(dst_ip)
+        dst_dcenter, _, _ = self.mac_to_position[dst_mac]
+        src_vmac = self.vmac_manager.mac_to_vmac[src_mac]
 
         # Record the communicating guests and time
         timestamp = time.time()

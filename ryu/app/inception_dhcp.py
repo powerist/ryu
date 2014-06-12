@@ -16,14 +16,12 @@
 #    under the License.
 
 import logging
-import os
 
 from oslo.config import cfg
 
 from ryu.lib.dpid import str_to_dpid
 
 from ryu.lib.packet import dhcp
-from ryu.app import inception_conf as i_conf
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,8 +44,7 @@ class InceptionDhcp(object):
         # name shortcuts
         self.dpset = inception.dpset
         self.mac_to_position = inception.mac_to_position
-        self.ip_to_mac = inception.ip_to_mac
-        self.mac_to_ip = inception.mac_to_ip
+        self.arp_mapping = inception.arp_mapping
 
     def update_server(self, dpid, port):
         if self.switch_dpid is not None and self.switch_port is not None:
@@ -72,12 +69,8 @@ class InceptionDhcp(object):
                 if option_value == dhcp.DHCP_ACK:
                     ip_addr = dhcp_header.yiaddr
                     mac_addr = dhcp_header.chaddr
-                    if ip_addr not in self.ip_to_mac:
-                        self.ip_to_mac[ip_addr] = mac_addr
-                        self.mac_to_ip[mac_addr] = ip_addr
-                        if CONF.zookeeper_storage:
-                            zk_path = os.path.join(i_conf.IP_TO_MAC, ip_addr)
-                            self.inception.zk.create(zk_path, mac_addr)
+                    if not self.arp_mapping.mapping_exist(ip_addr):
+                        self.inception.do_arp_learning(ip_addr, mac_addr)
                 break
 
         # A packet received from client. Find out the switch connected
@@ -100,7 +93,7 @@ class InceptionDhcp(object):
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
         elif dhcp_header.op == dhcp.DHCP_BOOT_REPLY:
-            _, dpid, port, _ = self.mac_to_position[dhcp_header.chaddr]
+            _, dpid, port = self.mac_to_position[dhcp_header.chaddr]
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s, port=%s)",
                         dhcp_header.chaddr, dpid, port)
