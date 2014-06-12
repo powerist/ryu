@@ -14,7 +14,12 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+from oslo.config import cfg
+
 from ryu.app import inception_conf as i_conf
+
+CONF = cfg.CONF
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 
 
 class InceptionRpc(object):
@@ -25,6 +30,8 @@ class InceptionRpc(object):
 
         # name shortcuts
         self.arp_mapping = inception.arp_mapping
+        self.topology = inception.topology
+        self.flow_manager = inception.flow_manager
         self.dpid_to_conns = self.inception.dpid_to_conns
         self.dcenter_to_info = self.inception.dcenter_to_info
         self.vmac_to_queries = self.inception.vmac_to_queries
@@ -63,24 +70,27 @@ class InceptionRpc(object):
         """
         # Failover logging
         log_tuple = (dpid_old, mac, vmac_old, vmac_new, dcenter_new)
-        self.inception.create_failover_log(i_conf.RPC_REDIRECT_FLOW, log_tuple)
+        if CONF.zookeeper_storage:
+            self.inception.create_failover_log(i_conf.RPC_REDIRECT_FLOW,
+                                               log_tuple)
 
-        if dcenter_new == self.inception.dcenter:
+        if dcenter_new == self.inception.dcenter_id:
             # This RPC is only used for multi-datacenter migration
-            self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
+            if CONF.zookeeper_storage:
+                self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
             return
 
         # Redirect local flow
-        gateway_dpid = self.inception.gateway
-        gateway_ip = self.inception.dpid_to_ip[gateway_dpid]
-        fwd_port = self.inception.dpid_to_conns[dpid_old][gateway_ip]
+        gateway_dpid = self.topology.gateway
+        fwd_port = self.topology.dpid_to_dpid[dpid_old][gateway_dpid]
 
-        self.inception.set_local_flow(dpid_old, vmac_old, vmac_new, fwd_port,
-                                      False)
+        self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
+                                         fwd_port, False)
 
         if vmac_old not in self.vmac_to_queries:
             # The vmac_old key does not exist, indicating a duplicate RPC
-            self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
+            if CONF.zookeeper_storage:
+                self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
             return
 
         # send gratuitous ARP to all local sending guests
@@ -92,7 +102,8 @@ class InceptionRpc(object):
                                               mac_query)
         del self.vmac_to_queries[vmac_old]
 
-        self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
+        if CONF.zookeeper_storage:
+            self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
 
     def set_gateway_flow(self, mac, vmac_old, vmac_new, dcenter_new):
         """Update gateway flow to rewrite an out-of-date vmac_old and
@@ -100,22 +111,25 @@ class InceptionRpc(object):
 
         # Failover logging
         log_tuple = (mac, vmac_old, vmac_new, dcenter_new)
-        self.inception.create_failover_log(i_conf.RPC_GATEWAY_FLOW, log_tuple)
+        if CONF.zookeeper_storage:
+            self.inception.create_failover_log(i_conf.RPC_GATEWAY_FLOW,
+                                               log_tuple)
 
         if vmac_old not in self.vmac_to_queries:
             # The vmac_old key does not exist, indicating a duplicate RPC
-            self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+            if CONF.zookeeper_storage:
+                self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
             return
 
-        if dcenter_new == self.inception.dcenter:
+        if dcenter_new == self.inception.dcenter_id:
             # This RPC is only used for multi-datacenter migration
-            self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+            if CONF.zookeeper_storage:
+                self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
             return
 
-        gateway = self.inception.gateway
-        _, remote_gw_ip = self.dcenter_to_info[dcenter_new]
-        fwd_port = self.dpid_to_conns[gateway][remote_gw_ip]
-        self.inception.set_local_flow(gateway, vmac_old, vmac_new, fwd_port)
+        gateway = self.topology.gateway
+        fwd_port = self.topology.gateway_to_dcenters[gateway][dcenter_new]
+        self.flow_manager.set_local_flow(gateway, vmac_old, vmac_new, fwd_port)
 
         # Send gratuitous arp to all guests that have done ARP requests to mac
         for mac_query in self.vmac_to_queries[vmac_old]:
@@ -124,4 +138,5 @@ class InceptionRpc(object):
             self.send_arp_reply(ip, vmac_new, ip_query, mac_query)
         del self.vmac_to_queries[vmac_old]
 
-        self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+        if CONF.zookeeper_storage:
+            self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)

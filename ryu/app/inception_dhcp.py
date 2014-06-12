@@ -16,7 +16,6 @@
 #    under the License.
 
 import logging
-import os
 
 from oslo.config import cfg
 

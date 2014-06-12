@@ -440,26 +440,8 @@ class Inception(app_manager.RyuApp):
             # Set up flows at gateway to redirect flows bound for
             # old vmac in dcenter_old to new vmac
             # The flow will expire after ARP cache expires
-            ip_new = self.dpid_to_ip[dpid_new]
-            gw_fwd_port = self.dpid_to_conns[self.gateway][ip_new]
-            datapath_gw = self.dpset.get(str_to_dpid(self.gateway))
-            ofproto = datapath_gw.ofproto
-            ofproto_parser = datapath_gw.ofproto_parser
-            actions = [ofproto_parser.OFPActionSetField(eth_dst=vmac_new),
-                       ofproto_parser.OFPActionOutput(int(gw_fwd_port))]
-            instructions = [
-                datapath_gw.ofproto_parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    actions)]
-            match_gw = ofproto_parser.OFPMatch(eth_dst=vmac_old)
-            self.set_flow(datapath=datapath_gw,
-                          match=match_gw,
-                          table_id=i_util.FlowManager.PRIMARY_TABLE,
-                          priority=i_priority.DATA_FWD_LOCAL,
-                          flags=ofproto.OFPFF_SEND_FLOW_REM,
-                          hard_timeout=CONF.arp_timeout,
-                          command=ofproto.OFPFC_ADD,
-                          instructions=instructions)
+            self.flow_manager.set_gateway_bounce_flow(dpid_new, vmac_new,
+                                                      vmac_old, self.topology)
 
             # Add flow at dpid_new towards vmac_new
             self.flow_manager.set_local_flow(dpid_new, vmac_new, mac, port_new)
@@ -500,8 +482,7 @@ class Inception(app_manager.RyuApp):
                                            port_new)
                 rpc_client.update_vmac(mac, vmac_new)
             # Instruct dpid_old to redirect traffic
-            ip_new = self.dpid_to_ip[dpid_new]
-            fwd_port = self.dpid_to_conns[dpid_old][ip_new]
+            fwd_port = self.topology.dpid_to_dpid[dpid_old][dpid_new]
             self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
                                              fwd_port, False)
             LOGGER.info("Redirect forward flow on (switch=%s) towards "
@@ -528,8 +509,7 @@ class Inception(app_manager.RyuApp):
         if port_old != port_new:
             # Same switch, different port migration
             # Redirect traffic
-            ip_new = self.dpid_to_ip[dpid_new]
-            fwd_port = self.dpid_to_conns[dpid_old][ip_new]
+            fwd_port = self.topology.dpid_to_dpid[dpid_old][dpid_new]
 
             self.flow_manager.set_local_flow(dpid_old, vmac_old, mac, fwd_port,
                                              False)

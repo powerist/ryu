@@ -35,6 +35,7 @@ CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('gateway_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
+CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
 CONF.import_opt('interdcenter_port_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('intradcenter_port_prefix', 'ryu.app.inception_conf')
 
@@ -51,8 +52,8 @@ class Topology(object):
     def __init__(self):
         # Connection between local pairs of switches
         self.dpid_to_dpid = defaultdict(dict)
-        # {dpid_gw -> [(dcenter_id, port_no)]}
-        self.gateway_to_dcenters = defaultdict(list)
+        # {dpid_gw -> {dcenter_id -> port_no}}
+        self.gateway_to_dcenters = defaultdict(dict)
         # TOOD(chen): multiple gateways
         self.gateway = None
         self.dhcp_switch = None
@@ -104,7 +105,7 @@ class Topology(object):
             elif port.name.startswith(remote_port_prefix):
                 peer_dcenter = self.extract_dcenter(port.name)
                 port_no = port.port_no
-                self.gateway_to_dcenters[dpid].append((peer_dcenter, port_no))
+                self.gateway_to_dcenters[dpid][peer_dcenter] = port_no
                 LOGGER.info("New inter-datacenter connection:"
                             "(gateway=%s) -> (datacenter=%s)",
                             dpid, peer_dcenter)
@@ -295,7 +296,8 @@ class FlowManager(object):
 
     def set_gateway_dcenter_flows(self, dpid_gw, topology, vmac_manager):
         """Set up flows on gateway switches to other datacenters"""
-        for (dcenter, port_no) in topology.gateway_to_dcenters[dpid_gw]:
+        dcenter_to_port = topology.gateway_to_dcenters[dpid_gw].items()
+        for (dcenter, port_no) in dcenter_to_port:
             peer_dc_vmac = vmac_manager.dcenter_to_vmac[dcenter]
             self.set_topology_flow(dpid_gw, peer_dc_vmac,
                                    VmacManager.DCENTER_MASK, port_no)
@@ -305,7 +307,7 @@ class FlowManager(object):
         # TODO(chen): Multiple gateways
         dpid_gw = topology.gateway
         gw_fwd_port = topology.dpid_to_dpid[dpid][dpid_gw]
-        for (dcenter, _) in topology.gateway_to_dcenters[dpid_gw]:
+        for dcenter in topology.gateway_to_dcenters[dpid_gw]:
             peer_dc_vmac = vmac_manager.dcenter_to_vmac[dcenter]
             self.set_topology_flow(dpid, peer_dc_vmac,
                                    VmacManager.DCENTER_MASK, gw_fwd_port)
@@ -351,6 +353,31 @@ class FlowManager(object):
 
         LOGGER.info("New forward flow: (switch=%s) -> (mac=%s, mask=%s)",
                     dpid, mac, mask)
+
+    def set_gateway_bounce_flow(self, dpid, vmac_new, vmac_old, topology):
+        """Set up a flow at gateway towards local dpid_old
+        during live migration to prevent
+        unnecessary multi-datacenter traffic"""
+        dpid_gw = topology.gateway
+        gw_fwd_port = topology.dpid_to_dpid[dpid_gw][dpid]
+        datapath_gw = self.dpset.get(str_to_dpid(dpid_gw))
+        ofproto = datapath_gw.ofproto
+        ofproto_parser = datapath_gw.ofproto_parser
+        actions = [ofproto_parser.OFPActionSetField(eth_dst=vmac_new),
+                   ofproto_parser.OFPActionOutput(int(gw_fwd_port))]
+        instructions = [
+            datapath_gw.ofproto_parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions)]
+        match_gw = ofproto_parser.OFPMatch(eth_dst=vmac_old)
+        self.set_flow(datapath=datapath_gw,
+                      match=match_gw,
+                      table_id=FlowManager.PRIMARY_TABLE,
+                      priority=i_priority.DATA_FWD_LOCAL,
+                      flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      hard_timeout=CONF.arp_timeout,
+                      command=ofproto.OFPFC_ADD,
+                      instructions=instructions)
 
     def set_drop_flow(self, dpid, table_id=0):
         """Set up a flow to drop all packets that do not match any flow"""
@@ -569,6 +596,7 @@ class TenantManager(object):
             return self.mac_to_tenant[mac]
         else:
             return TenantManager.DEFAULT_TENANT_ID
+
 
 class ArpMapping(object):
     """Maintain IP <=> MAC mapping"""
