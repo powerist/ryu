@@ -509,9 +509,7 @@ class Inception(app_manager.RyuApp):
         if port_old != port_new:
             # Same switch, different port migration
             # Redirect traffic
-            fwd_port = self.topology.dpid_to_dpid[dpid_old][dpid_new]
-
-            self.flow_manager.set_local_flow(dpid_old, vmac_old, mac, fwd_port,
+            self.flow_manager.set_local_flow(dpid_old, vmac_old, mac, port_new,
                                              False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
