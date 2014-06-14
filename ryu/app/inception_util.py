@@ -190,7 +190,8 @@ class VmacManager(object):
         #TODO(chen): Avoid hash conflict
         vm_id = (hash(vm_mac) % self.VM_MAXID + 1)
         if self.dpid_to_vmidlist[dpid][vm_id]:
-            LOGGER.info("ERROR: switch id conflict: ", vm_id)
+            LOGGER.info("WARNING: switch id conflict:"
+                        "vm_id=%s has been created for dpid=%s", vm_id, dpid)
         else:
             self.dpid_to_vmidlist[dpid][vm_id] = True
 
