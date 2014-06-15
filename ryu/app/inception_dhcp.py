@@ -36,15 +36,15 @@ class InceptionDhcp(object):
     """Inception Cloud DHCP module for handling DHCP packets."""
 
     def __init__(self, inception):
-        self.inception = inception
-
         self.switch_dpid = None
         self.switch_port = None
 
         # name shortcuts
         self.dpset = inception.dpset
-        self.mac_to_position = inception.mac_to_position
-        self.arp_mapping = inception.arp_mapping
+        self.dcenter_id = inception.dcenter_id
+        self.arp_manager = inception.arp_manager
+        self.vm_manager = inception.vm_manager
+        self.rpc_manager = inception.rpc_manager
 
     def update_server(self, dpid, port):
         if self.switch_dpid is not None and self.switch_port is not None:
@@ -69,8 +69,9 @@ class InceptionDhcp(object):
                 if option_value == dhcp.DHCP_ACK:
                     ip_addr = dhcp_header.yiaddr
                     mac_addr = dhcp_header.chaddr
-                    if not self.arp_mapping.mapping_exist(ip_addr):
-                        self.inception.do_arp_learning(ip_addr, mac_addr)
+                    if not self.arp_manager.mapping_exist(ip_addr):
+                        self.arp_manager.learn_arp_mapping(ip_addr, mac_addr,
+                                                           self.rpc_manager)
                 break
 
         # A packet received from client. Find out the switch connected
@@ -93,7 +94,7 @@ class InceptionDhcp(object):
         # A packet received from server. Find out the mac address of
         # the client and forward the packet to it.
         elif dhcp_header.op == dhcp.DHCP_BOOT_REPLY:
-            _, dpid, port = self.mac_to_position[dhcp_header.chaddr]
+            _, dpid, port = self.vm_manager.get_position(dhcp_header.chaddr)
             LOGGER.info("Forward DHCP message to client (mac=%s) at "
                         "(switch=%s, port=%s)",
                         dhcp_header.chaddr, dpid, port)
