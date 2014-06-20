@@ -20,6 +20,7 @@ from ryu.app import inception_conf as i_conf
 
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
+CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
 
 
 class InceptionRpc(object):
@@ -85,7 +86,7 @@ class InceptionRpc(object):
         fwd_port = self.topology.dpid_to_dpid[dpid_old][gateway_dpid]
 
         self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
-                                         fwd_port, False)
+                                         fwd_port, False, CONF.arp_timeout)
 
         if vmac_old not in self.vmac_to_queries:
             # The vmac_old key does not exist, indicating a duplicate RPC
@@ -129,7 +130,8 @@ class InceptionRpc(object):
 
         gateway = self.topology.gateway
         fwd_port = self.topology.gateway_to_dcenters[gateway][dcenter_new]
-        self.flow_manager.set_local_flow(gateway, vmac_old, vmac_new, fwd_port)
+        self.flow_manager.set_local_flow(gateway, vmac_old, vmac_new, fwd_port,
+                                         CONF.arp_timeout)
 
         # Send gratuitous arp to all guests that have done ARP requests to mac
         for mac_query in self.vmac_to_queries[vmac_old]:
