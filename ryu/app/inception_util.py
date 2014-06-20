@@ -519,7 +519,7 @@ class FlowManager(object):
                       command=ofproto.OFPFC_ADD,
                       instructions=inst)
 
-    def set_local_flow(self, dpid, vmac, mac, port, flow_add=True):
+    def set_local_flow(self, dpid, vmac, mac, port, flow_add=True, timeout=0):
         """Set up a microflow on a switch (dpid) towards a guest (mac)
         The rule matches on dst vmac, rewrites it to mac and forwards to
         the appropriate port.
@@ -546,6 +546,7 @@ class FlowManager(object):
                       table_id=FlowManager.PRIMARY_TABLE,
                       priority=i_priority.DATA_FWD_LOCAL,
                       flags=ofproto.OFPFF_SEND_FLOW_REM,
+                      hard_timeout=timeout,
                       command=flow_cmd,
                       instructions=instructions)
         if self.multi_tenancy:
@@ -553,6 +554,7 @@ class FlowManager(object):
                           match=match,
                           table_id=FlowManager.SECONDARY_TABLE,
                           priority=i_priority.DATA_FWD_LOCAL,
+                          hard_timeout=timeout,
                           flags=ofproto.OFPFF_SEND_FLOW_REM,
                           command=flow_cmd,
                           instructions=instructions)
