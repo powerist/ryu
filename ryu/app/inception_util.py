@@ -20,6 +20,7 @@ import os
 import time
 
 from collections import defaultdict
+from collections import deque
 import logging
 
 from oslo.config import cfg
@@ -177,21 +178,25 @@ class SwitchManager(object):
 
         # Local cache
         self.self_dcenter = self_dcenter
-        # Record vm id usage of each local switch, to detect vm id conflict
-        # {dpid => [used vm_ids]}
-        self.dpid_to_vmids = defaultdict(list)
-
-    def mac_id_exists(self, mac_id, dpid):
-        return (mac_id in self.dpid_to_vmids[dpid])
-
-    def update_mac_id(self, mac_id, dpid):
-        self.dpid_to_vmids[dpid].append(mac_id)
+        # Record available ids of each switch which can be assigned to VMs
+        # {dpid => deque(available ids)}
+        self.dpid_to_vmids = defaultdict(deque)
 
     def add_local_switch(self, dpid):
-        self.dpid_to_vmids[dpid] = []
+        self.dpid_to_vmids[dpid] = deque(xrange(self.SWITCH_MAXID))
         switch_id = self.generate_swc_id(dpid)
 
         return switch_id
+
+    def create_vm_id(self, dpid):
+        try:
+            vm_id = self.dpid_to_vmids[dpid].pop()
+            return vm_id
+        except IndexError:
+            return None
+
+    def recollect_vm_id(self, vm_id, dpid):
+        self.dpid_to_vmids[dpid].appendleft(vm_id)
 
     def generate_swc_id(self, dpid):
         """Create switch id"""
@@ -243,17 +248,15 @@ class VmManager(object):
 
     def generate_vm_id(self, mac, dpid, switch_manager):
         """Generate a new vm_id, 00 is saved for switch"""
-        #TODO(chen): Avoid hash conflict
-        vm_id = (hash(mac) % self.VM_MAXID + 1)
-        if switch_manager.mac_id_exists(vm_id, dpid):
-            LOGGER.info("WARNING: switch id conflict:"
-                        "vm_id=%s has been created for dpid=%s", vm_id, dpid)
-            return None
-        else:
-            switch_manager.update_mac_id(vm_id, dpid)
-            self.mac_to_id[mac] = vm_id
+        vm_id = switch_manager.create_vm_id(dpid)
+        self.mac_to_id[mac] = vm_id
 
         return vm_id
+
+    def revoke_vm_id(self, mac, vm_id):
+        if self.mac_to_id[mac] != vm_id:
+            return False
+        del self.mac_to_id[mac]
 
     def update_vm_id(self, mac, vm_id):
         self.mac_to_id[mac] = vm_id
@@ -786,6 +789,10 @@ class RPCManager(object):
     def rpc_update_vmid(self, mac, vm_id):
         for rpc_client in self.dcenter_to_rpc.values():
             rpc_client.update_vm_id(mac, vm_id)
+
+    def rpc_revoke_vmid(self, mac, vm_id, dpid):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.revoke_vm_id(mac, vm_id, dpid)
 
 
 class ArpManager(object):

@@ -327,6 +327,13 @@ class Inception(app_manager.RyuApp):
             vmac_record = self.vmac_manager.get_vm_vmac(mac)
             if vmac_record == vmac_old:
                 # A new vmac has not been created
+
+                # Revoke old vm_id
+                vm_id_old = self.vm_manager.get_vm_id(mac)
+                self.vm_manager.revoke_vm_id(mac, vm_id_old)
+                self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
+                self.rpc_manager.rpc_revoke_vmid(mac, vm_id_old, dpid_old)
+                # Generate new vm_id
                 vm_id = self.vm_manager.generate_vm_id(mac, dpid_new,
                                                        self.switch_manager)
                 self.rpc_manager.rpc_update_vmid(mac, vm_id)
@@ -374,6 +381,12 @@ class Inception(app_manager.RyuApp):
             # Install/Update a new flow at dpid_new towards mac
             vmac_record = self.vmac_manager.get_vm_vmac(mac)
             if vmac_record == vmac_old:
+                # Revoke old vm_id
+                vm_id_old = self.vm_manager.get_vm_id(mac)
+                self.vm_manager.revoke_vm_id(mac, vm_id_old)
+                self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
+                self.rpc_manager.rpc_revoke_vmid(mac, vm_id_old, dpid_old)
+                # Generate new vm_id
                 vm_id = self.vm_manager.generate_vm_id(mac, dpid_new,
                                                        self.switch_manager)
                 self.rpc_manager.rpc_update_vmid(mac, vm_id)

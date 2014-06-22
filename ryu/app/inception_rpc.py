@@ -35,6 +35,7 @@ class InceptionRpc(object):
         self.vmac_manager = inception.vmac_manager
         self.tenant_manager = inception.tenant_manager
         self.vm_manager = inception.vm_manager
+        self.switch_manager = inception.switch_manager
 
     def update_arp_mapping(self, ip, mac):
         """Update remote ip_mac mapping"""
@@ -60,6 +61,10 @@ class InceptionRpc(object):
         # Locally reconstruct vm vmac
         self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
                                          self.vm_manager)
+
+    def revoke_vm_id(self, mac, vm_id, dpid):
+        self.vm_manager.revoke_vm_id(mac, vm_id)
+        self.switch_manager.recollect_vm_id(vm_id, dpid)
 
     def del_tenant_filter(self, dpid, mac):
         self.inception.flow_manager.del_tenant_filter(dpid, mac)
