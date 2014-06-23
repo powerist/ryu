@@ -47,9 +47,11 @@ CONF.register_opts([
     cfg.StrOpt('zk_log_level',
                default='warning',
                help="Log level for Kazoo/ZooKeeper"),
-    cfg.StrOpt('gateway_ip',
+    cfg.StrOpt('gateway_ips',
                default="127.0.0.1",
-               help="IP address of the physical machine hosting gateway"),
+               help=("IP addresses of the physical machine hosting gateway"
+                     "Format: <gateway_ip1>,<gateway_ip2>,...\n"
+                     "E.g., 192.168.0.1,192.168.0.2")),
     cfg.StrOpt('dhcp_ip',
                default="127.0.0.1",
                help="IP address of the physical machine hosting dhcp server"),
@@ -101,28 +103,3 @@ CONF.register_opts([
                 default=[ofproto_v1_2.OFP_VERSION],
                 help="Default OpenFlow versions to use"),
 ])
-
-"""
-Path in ZooKeeper, under which records a datacenter ("dcenter") in
-which a guest VM ("MAC") resides, the switch ("DPID") the VM is connected
-to, the "port" of the connection, and its virtual mac.
-
-{MAC => (dcenter, dpid, port, vmac)}
-"""
-MAC_TO_POSITION = os.path.join(CONF.zk_data, 'mac_to_position')
-
-"""
-Path in ZooKeeper, under which records mapping from VM's "IP" address to
-VM's "MAC" address for address resolution protocol (ARP).
-
-{IP => MAC}
-"""
-IP_TO_MAC = os.path.join(CONF.zk_data, 'ip_to_mac')
-
-"""
-Path in ZooKeeper, under which records mapping from switch ("DPID") to
-its virtual "MAC" address.
-
-{dpid => vmac}
-"""
-DPID_TO_VMAC = os.path.join(CONF.zk_data, 'dpid_to_vmac')

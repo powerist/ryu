@@ -25,6 +25,7 @@ from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_rpc as i_rpc
 from ryu.app import inception_util as i_util
 from ryu.app.inception_util import ZkManager
+from ryu.app.inception_util import Topology
 from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import handler
@@ -47,6 +48,7 @@ CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
 CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
+CONF.import_opt('gateway_ips', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
 CONF.import_opt('self_dcenter', 'ryu.app.inception_conf')
 CONF.import_opt('rpc_port', 'ryu.app.inception_conf')
@@ -75,7 +77,7 @@ class Inception(app_manager.RyuApp):
         self.dcenter_id = CONF.self_dcenter
 
         self.vmac_manager = i_util.VmacManager(self.dcenter_id)
-        self.topology = i_util.Topology()
+        self.topology = Topology.topology_from_gateways(CONF.gateway_ips)
         self.flow_manager = i_util.FlowManager(self.dpset, CONF.multi_tenancy)
         self.tenant_manager = i_util.TenantManager(CONF.tenant_info)
         self.arp_manager = i_util.ArpManager()
@@ -115,12 +117,15 @@ class Inception(app_manager.RyuApp):
             socket = datapath.socket
             ip, _ = socket.getpeername()
 
-            # Update topology
             self.topology.update_switch(dpid, ip, event.ports)
-            switch_id = self.switch_manager.add_local_switch(dpid)
-            self.zk_manager.log_dpid_id(self.dcenter_id, dpid, switch_id)
-            self.rpc_manager.rpc_update_swcid(self.dcenter_id, dpid, switch_id)
-            self.vmac_manager.create_swc_vmac(self.dcenter_id, dpid, switch_id)
+            switch_id = self.switch_manager.get_swc_id(self.dcenter_id, dpid)
+            if switch_id is None:
+                switch_id = self.switch_manager.add_local_switch(dpid)
+                self.zk_manager.log_dpid_id(self.dcenter_id, dpid, switch_id)
+                self.rpc_manager.rpc_update_swcid(self.dcenter_id, dpid,
+                                                  switch_id)
+                self.vmac_manager.create_swc_vmac(self.dcenter_id, dpid,
+                                                  switch_id)
             if self.topology.is_gateway(dpid):
                 self.flow_manager.set_new_gateway_flows(dpid, self.topology,
                                                         self.vmac_manager)
@@ -243,8 +248,8 @@ class Inception(app_manager.RyuApp):
                                            in_port):
             pos_old = self.vm_manager.get_position(ethernet_src)
             (dcenter_old, dpid_old, port_old) = pos_old
-            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, dpid,
-                         in_port)
+            log_tuple = (ethernet_src, dcenter_old, dpid_old, str(port_old),
+                         dpid, str(in_port))
             self.zk_manager.create_failover_log(ZkManager.MIGRATION, log_tuple)
             self.handle_migration(ethernet_src, dcenter_old, dpid_old,
                                   port_old, dpid, in_port)

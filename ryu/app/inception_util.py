@@ -42,7 +42,6 @@ LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
-CONF.import_opt('gateway_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
 CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
@@ -60,19 +59,25 @@ class Topology(object):
     dpid_to_dpid: {dpid1 -> {dpid2 -> port}}
     gateway_to_dcenters: {gateway_dpid -> {dcenter -> port}}
     """
-    def __init__(self):
+    def __init__(self, gateway_ips=()):
         # Connection between local pairs of switches
         self.dpid_to_dpid = defaultdict(dict)
         # {dpid_gw -> {dcenter_id -> port_no}}
         self.gateway_to_dcenters = defaultdict(dict)
-        # TOOD(chen): multiple gateways
-        self.gateway = None
+        self.gateway_ips = gateway_ips
+        self.gateways = []
         self.dhcp_switch = None
         self.dhcp_port = None
         # {local dpid -> {remote ip -> local port}}
         self.dpid_ip_to_port = defaultdict(dict)
         # {local ip -> local dpid}
         self.ip_to_dpid = {}
+
+    @classmethod
+    def topology_from_gateways(cls, gateway_ips_str):
+        gateway_ips = str_to_tuple(gateway_ips_str)
+        topology = cls(gateway_ips)
+        return topology
 
     def update_switch(self, dpid_new, ip_new, ports):
         """Update switch topology"""
@@ -84,8 +89,8 @@ class Topology(object):
             self.dhcp_switch = dpid_new
             LOGGER.info("DHCP server switch: (ip=%s), (dpid=%s)", ip_new,
                         dpid_new)
-        if ip_new == CONF.gateway_ip:
-            self.gateway = dpid_new
+        if ip_new in self.gateway_ips:
+            self.gateways.append(dpid_new)
             LOGGER.info("Gateway switch: (ip=%s), (dpid=%s)", ip_new, dpid_new)
 
     def parse_switch_ports(self, dpid, ip, switch_ports):
@@ -143,15 +148,15 @@ class Topology(object):
     def gateway_connected(self):
         """Check if any gateway is connected or not"""
 
-        return self.gateway is not None
+        return self.gateways
 
     def is_gateway(self, dpid):
         """Check if dpid is gateway"""
 
-        return dpid == self.gateway
+        return (dpid in self.gateways)
 
-    def get_gateway(self):
-        return self.gateway
+    def get_gateways(self):
+        return self.gateways
 
     def is_dhcp(self, dpid):
         """Check if dpid is dhcp server"""
@@ -161,8 +166,8 @@ class Topology(object):
     def get_fwd_port(self, dpid1, dpid2):
         return self.dpid_to_dpid[dpid1][dpid2]
 
-    def get_dcenter_port(self, dcenter):
-        return self.gateway_to_dcenters[self.gateway][dcenter]
+    def get_dcenter_port(self, dpid_gw, dcenter):
+        return self.gateway_to_dcenters[dpid_gw][dcenter]
 
     def get_neighbors(self, dpid):
         return self.dpid_to_dpid[dpid]
@@ -220,6 +225,7 @@ class SwitchManager(object):
 
     def invalidate_vm_id(self, dpid, vm_id):
         if dpid not in self.dpid_to_vmids:
+            self.dpid_to_vmids[dpid] = deque(xrange(self.SWITCH_MAXID))
             return False
 
         try:
@@ -245,7 +251,6 @@ class VmManager(object):
         """Update guest MAC and its connected switch"""
         pos_tuple = (dcenter, dpid, port)
         self.mac_to_position[mac] = pos_tuple
-        # TOZOO: Add port -> mac path
 
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s)",
                     mac, dcenter, dpid, port)
@@ -440,13 +445,13 @@ class FlowManager(object):
 
     def set_switch_dcenter_flows(self, dpid, topology, vmac_manager):
         """Set up flows on non-gateway switches to other datacenters"""
-        # TODO(chen): Multiple gateways
-        dpid_gw = topology.gateway
-        gw_fwd_port = topology.get_fwd_port(dpid, dpid_gw)
-        for dcenter in topology.gateway_to_dcenters[dpid_gw]:
-            peer_dc_vmac = vmac_manager.create_dc_vmac(dcenter)
-            self.set_topology_flow(dpid, peer_dc_vmac,
-                                   VmacManager.DCENTER_MASK, gw_fwd_port)
+        dpid_gws = topology.get_gateways()
+        for dpid_gw in dpid_gws:
+            gw_fwd_port = topology.get_fwd_port(dpid, dpid_gw)
+            for dcenter in topology.gateway_to_dcenters[dpid_gw]:
+                peer_dc_vmac = vmac_manager.create_dc_vmac(dcenter)
+                self.set_topology_flow(dpid, peer_dc_vmac,
+                                       VmacManager.DCENTER_MASK, gw_fwd_port)
 
     def set_interswitch_flows(self, dpid, topology, vmac_manager):
         """Set up flows connecting the new switch(dpid) and
@@ -494,26 +499,27 @@ class FlowManager(object):
         """Set up a flow at gateway towards local dpid_old
         during live migration to prevent
         unnecessary multi-datacenter traffic"""
-        dpid_gw = topology.gateway
-        gw_fwd_port = topology.get_fwd_port(dpid_gw, dpid)
-        datapath_gw = self.dpset.get(str_to_dpid(dpid_gw))
-        ofproto = datapath_gw.ofproto
-        ofproto_parser = datapath_gw.ofproto_parser
-        actions = [ofproto_parser.OFPActionSetField(eth_dst=vmac_new),
-                   ofproto_parser.OFPActionOutput(int(gw_fwd_port))]
-        instructions = [
-            datapath_gw.ofproto_parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
-                actions)]
-        match_gw = ofproto_parser.OFPMatch(eth_dst=vmac_old)
-        self.set_flow(datapath=datapath_gw,
-                      match=match_gw,
-                      table_id=FlowManager.PRIMARY_TABLE,
-                      priority=i_priority.DATA_FWD_LOCAL,
-                      flags=ofproto.OFPFF_SEND_FLOW_REM,
-                      hard_timeout=CONF.arp_timeout,
-                      command=ofproto.OFPFC_ADD,
-                      instructions=instructions)
+        dpid_gws = topology.get_gateways()
+        for dpid_gw in dpid_gws:
+            gw_fwd_port = topology.get_fwd_port(dpid_gw, dpid)
+            datapath_gw = self.dpset.get(str_to_dpid(dpid_gw))
+            ofproto = datapath_gw.ofproto
+            ofproto_parser = datapath_gw.ofproto_parser
+            actions = [ofproto_parser.OFPActionSetField(eth_dst=vmac_new),
+                       ofproto_parser.OFPActionOutput(int(gw_fwd_port))]
+            instructions = [
+                datapath_gw.ofproto_parser.OFPInstructionActions(
+                    ofproto.OFPIT_APPLY_ACTIONS,
+                    actions)]
+            match_gw = ofproto_parser.OFPMatch(eth_dst=vmac_old)
+            self.set_flow(datapath=datapath_gw,
+                          match=match_gw,
+                          table_id=FlowManager.PRIMARY_TABLE,
+                          priority=i_priority.DATA_FWD_LOCAL,
+                          flags=ofproto.OFPFF_SEND_FLOW_REM,
+                          hard_timeout=CONF.arp_timeout,
+                          command=ofproto.OFPFC_ADD,
+                          instructions=instructions)
 
     def set_drop_flow(self, dpid, table_id=0):
         """Set up a flow to drop all packets that do not match any flow"""
@@ -918,11 +924,11 @@ class ZkManager(object):
                     for mac_unicode in self.zk.get_children(port_path):
                         mac = mac_unicode.encode('Latin-1')
                         mac_path = os.path.join(port_path, mac)
-                        mac_id, _ = self.zk.get(mac_path)
-                        switch_manager.invalidate_vm_id(dpid, mac_id)
+                        mac_id_str, _ = self.zk.get(mac_path)
+                        switch_manager.invalidate_vm_id(dpid, int(mac_id_str))
                         vm_manager.update_position(mac, dcenter, dpid,
                                                    int(port_str))
-                        vm_manager.update_vm_id(mac, mac_id)
+                        vm_manager.update_vm_id(mac, int(mac_id_str))
                         vm_vmac = vmac_manager.create_vm_vmac(mac,
                                                               tenant_manager,
                                                               vm_manager)
