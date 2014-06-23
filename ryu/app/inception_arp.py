@@ -15,10 +15,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import logging
+import time
 
 from oslo.config import cfg
 
-from ryu.app import inception_conf as i_conf
+from ryu.app.inception_util import ZkManager
 from ryu.lib.dpid import str_to_dpid
 from ryu.lib.packet import arp
 from ryu.lib.packet import ethernet
@@ -43,6 +44,7 @@ class InceptionArp(object):
         self.arp_manager = inception.arp_manager
         self.vmac_manager = inception.vmac_manager
         self.vm_manager = inception.vm_manager
+        self.zk_manager = inception.zk_manager
         self.rpc_manager = inception.rpc_manager
 
     def handle(self, dpid, in_port, arp_header):
@@ -54,11 +56,13 @@ class InceptionArp(object):
 
         # Do {IP => MAC} learning
         log_tuple = (src_ip, src_mac)
-        if CONF.zookeeper_storage:
-            self.inception.create_failover_log(i_conf.ARP_LEARNING, log_tuple)
-        self.arp_manager.learn_arp_mapping(src_ip, src_mac, self.rpc_manager)
-        if CONF.zookeeper_storage:
-            self.inception.delete_failover_log(i_conf.ARP_LEARNING)
+
+        self.zk_manager.create_failover_log(ZkManager.ARP_LEARNING, log_tuple)
+        if not self.arp_manager.mapping_exist(src_ip):
+            self.arp_manager.learn_arp_mapping(src_ip, src_mac)
+            self.rpc_manager.rpc_update_arp(src_ip, src_mac)
+            self.zk_manager.log_arp_mapping(src_ip, src_mac)
+        self.zk_manager.delete_failover_log(ZkManager.ARP_LEARNING)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
             self._handle_arp_request(dpid, in_port, arp_header)
@@ -92,19 +96,21 @@ class InceptionArp(object):
         dst_ip = arp_header.dst_ip
 
         LOGGER.info("ARP request: (ip=%s) query (ip=%s)", src_ip, dst_ip)
-        src_vmac = self.vmac_manager.get_vm_vmac(src_mac)
+
         if self.arp_manager.mapping_exist(dst_ip):
             dst_mac = self.arp_manager.get_mac(arp_header.dst_ip)
             dst_vmac = self.vmac_manager.get_vm_vmac(dst_mac)
-            dst_dcenter, _, _ = self.vm_manager.get_position(dst_mac)
+            dst_pos = self.vm_manager.get_position(dst_mac)
+            (dst_dcenter, dst_dpid, dst_port) = dst_pos
 
             LOGGER.info("Cache hit: (dst_ip=%s) <=> (mac=%s, vmac=%s)",
                         dst_ip, dst_mac, dst_vmac)
 
             # Record the communicating guests and time
-            self.vmac_manager.update_query(dst_vmac, src_mac)
-            if dst_dcenter == self.dcenter_id:
-                self.vmac_manager.update_query(src_vmac, dst_mac)
+            query_time = time.time()
+            self.vmac_manager.update_query(dst_vmac, src_mac, query_time)
+            self.zk_manager.log_query_mac(dst_dcenter, dst_dpid, dst_port,
+                                          dst_mac, src_mac, query_time)
 
             # Send arp reply
             src_mac_reply = dst_vmac
@@ -139,30 +145,3 @@ class InceptionArp(object):
                     actions=actions_out))
             LOGGER.info("Send ARP reply of (ip=%s) to (ip=%s): ",
                         src_ip, dst_ip)
-
-    def _handle_arp_reply(self, arp_header):
-        """Process ARP reply packet."""
-
-        src_ip = arp_header.src_ip
-        src_mac = arp_header.src_mac
-        dst_ip = arp_header.dst_ip
-        dst_vmac = arp_header.dst_mac
-
-        LOGGER.info("ARP reply: (ip=%s) answer (ip=%s)", src_ip, dst_ip)
-
-        dst_mac = self.arp_manager.get_mac(dst_ip)
-        dst_dcenter, _, _ = self.vm_manager.get_position(dst_mac)
-        src_vmac = self.vmac_manager.get_vm_vmac(src_mac)
-
-        # Record the communicating guests and time
-        self.vmac_manager.update_query(dst_vmac, src_mac)
-
-        if dst_dcenter == self.dcenter_id:
-            self.vmac_manager.update_query(src_vmac, dst_mac)
-            # An arp reply towards a local server
-            self.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)
-
-        else:
-            # An arp reply towards a remote server in another datacenter
-            rpc_client = self.rpc_manager.get_rpc_client(dst_dcenter)
-            rpc_client.send_arp_reply(src_ip, src_vmac, dst_ip, dst_mac)

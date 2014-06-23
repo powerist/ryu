@@ -44,6 +44,7 @@ class InceptionDhcp(object):
         self.dcenter_id = inception.dcenter_id
         self.arp_manager = inception.arp_manager
         self.vm_manager = inception.vm_manager
+        self.zk_manager = inception.zk_manager
         self.rpc_manager = inception.rpc_manager
 
     def update_server(self, dpid, port):
@@ -72,6 +73,8 @@ class InceptionDhcp(object):
                     if not self.arp_manager.mapping_exist(ip_addr):
                         self.arp_manager.learn_arp_mapping(ip_addr, mac_addr,
                                                            self.rpc_manager)
+                        self.rpc_manager.rpc_update_arp(ip_addr, mac_addr)
+                        self.zk_manager.log_arp_mapping(ip_addr, mac_addr)
                 break
 
         # A packet received from client. Find out the switch connected

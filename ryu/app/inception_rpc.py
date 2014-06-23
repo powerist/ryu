@@ -16,7 +16,7 @@
 #    under the License.
 from oslo.config import cfg
 
-from ryu.app import inception_conf as i_conf
+from ryu.app.inception_util import ZkManager
 
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
@@ -36,10 +36,12 @@ class InceptionRpc(object):
         self.tenant_manager = inception.tenant_manager
         self.vm_manager = inception.vm_manager
         self.switch_manager = inception.switch_manager
+        self.zk_manager = inception.zk_manager
 
     def update_arp_mapping(self, ip, mac):
         """Update remote ip_mac mapping"""
         self.arp_manager.update_mapping(ip, mac)
+        self.zk_manager.log_arp_mapping(ip, mac)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         self.inception.inception_arp.send_arp_reply(src_ip, src_mac, dst_ip,
@@ -47,17 +49,24 @@ class InceptionRpc(object):
 
     def update_position(self, mac, dcenter, dpid, port):
         self.vm_manager.update_position(mac, dcenter, dpid, port)
+        self.zk_manager.log_vm_position(dcenter, dpid, port, mac)
+
+    def del_pos_in_zk(self, dcenter, dpid, port):
+        self.zk_manager.del_vm_position(dcenter, dpid, port)
 
     def update_vmac(self, mac, vmac):
         self.inception.vmac_manager.update_vm_vmac(mac, vmac)
 
     def update_swc_id(self, dcenter, dpid, switch_id):
         self.inception.switch_manager.update_swc_id(dcenter, dpid, switch_id)
+        self.zk_manager.log_dpid_id(dcenter, dpid, switch_id)
         # Locally reconstruct switch vmac
         self.vmac_manager.create_swc_vmac(dcenter, dpid, switch_id)
 
     def update_vm_id(self, mac, vm_id):
         self.inception.vm_manager.update_vm_id(mac, vm_id)
+        (dcenter, dpid, port) = self.vm_manager.get_position(mac)
+        self.zk_manager.log_vm_id(dcenter, dpid, port, mac, vm_id)
         # Locally reconstruct vm vmac
         self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
                                          self.vm_manager)
@@ -76,9 +85,8 @@ class InceptionRpc(object):
         """
         # Failover logging
         log_tuple = (dpid_old, mac, vmac_old, vmac_new)
-        if CONF.zookeeper_storage:
-            self.inception.create_failover_log(i_conf.RPC_REDIRECT_FLOW,
-                                               log_tuple)
+        self.zk_manager.create_failover_log(ZkManager.RPC_REDIRECT_FLOW,
+                                           log_tuple)
 
         # Redirect local flow
         dpid_gw = self.topology.get_gateway()
@@ -95,8 +103,7 @@ class InceptionRpc(object):
                                                         mac_query)
         self.vmac_manager.del_vmac_query(vmac_old)
 
-        if CONF.zookeeper_storage:
-            self.inception.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
+        self.zk_manager.delete_failover_log(ZkManager.RPC_REDIRECT_FLOW)
 
     def set_gateway_flow(self, mac, vmac_old, vmac_new, dcenter_new):
         """Update gateway flow to rewrite an out-of-date vmac_old to vmac_new
@@ -104,9 +111,8 @@ class InceptionRpc(object):
 
         # Failover logging
         log_tuple = (mac, vmac_old, vmac_new, dcenter_new)
-        if CONF.zookeeper_storage:
-            self.inception.create_failover_log(i_conf.RPC_GATEWAY_FLOW,
-                                               log_tuple)
+        self.zk_manager.create_failover_log(ZkManager.RPC_GATEWAY_FLOW,
+                                           log_tuple)
 
         dpid_gw = self.topology.get_gateway()
         fwd_port = self.topology.get_dcenter_port(dcenter_new)
@@ -119,5 +125,4 @@ class InceptionRpc(object):
             self.send_arp_reply(ip, vmac_new, ip_query, mac_query)
         self.vmac_manager.del_vmac_query(vmac_old)
 
-        if CONF.zookeeper_storage:
-            self.inception.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+        self.zk_manager.delete_failover_log(ZkManager.RPC_GATEWAY_FLOW)

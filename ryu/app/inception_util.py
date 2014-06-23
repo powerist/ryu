@@ -23,15 +23,17 @@ from collections import defaultdict
 from collections import deque
 import logging
 
+from kazoo import client
+
 from oslo.config import cfg
 from SimpleXMLRPCServer import SimpleXMLRPCServer
 import socket
 from xmlrpclib import ServerProxy
 
+from ryu import log
 from ryu.lib.dpid import str_to_dpid
 from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_priority as i_priority
-from ryu.app import inception_conf as i_conf
 from ryu.lib import hub
 from ryu.ofproto import ether
 from ryu.ofproto import inet
@@ -170,7 +172,7 @@ class SwitchManager(object):
     """Manage openflow-switches"""
     SWITCH_MAXID = 65535
 
-    def __init__(self, self_dcenter=0):
+    def __init__(self, self_dcenter='0'):
         # Zookeeper data
         # Record all switches id assignment, to detect switch id conflict
         # {dcenter => {dpid => id}}
@@ -204,7 +206,7 @@ class SwitchManager(object):
         local_ids = self.dcenter_to_swcids[self.self_dcenter]
         if switch_id in local_ids.values():
             # TODO(chen): Hash conflict
-            LOGGER.info("ERROR: switch id conflict: ", switch_id)
+            LOGGER.info("ERROR: switch id conflict: %s", switch_id)
         else:
             local_ids[dpid] = switch_id
 
@@ -212,10 +214,19 @@ class SwitchManager(object):
 
     def update_swc_id(self, dcenter, dpid, switch_id):
         self.dcenter_to_swcids[dcenter][dpid] = switch_id
-        # TOZOO
 
     def get_swc_id(self, dcenter, dpid):
         return self.dcenter_to_swcids[dcenter].get(dpid)
+
+    def invalidate_vm_id(self, dpid, vm_id):
+        if dpid not in self.dpid_to_vmids:
+            return False
+
+        try:
+            self.dpid_to_vmids[dpid].remove(vm_id)
+            return True
+        except ValueError:
+            return False
 
 
 class VmManager(object):
@@ -233,18 +244,11 @@ class VmManager(object):
     def update_position(self, mac, dcenter, dpid, port):
         """Update guest MAC and its connected switch"""
         pos_tuple = (dcenter, dpid, port)
-        if CONF.zookeeper_storage:
-            zk_data = tuple_to_str(pos_tuple)
-            zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
-            if mac in self.mac_to_position:
-                self.zk.set(zk_path, zk_data)
-            else:
-                self.zk.create(zk_path, zk_data)
         self.mac_to_position[mac] = pos_tuple
         # TOZOO: Add port -> mac path
 
-        LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s)"
-                    , mac, dcenter, dpid, port)
+        LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s)",
+                    mac, dcenter, dpid, port)
 
     def generate_vm_id(self, mac, dpid, switch_manager):
         """Generate a new vm_id, 00 is saved for switch"""
@@ -286,7 +290,7 @@ class VmacManager(object):
     SWITCH_MASK = "ff:ff:ff:ff:00:00"
     TENANT_MASK = "00:00:00:00:00:ff"
 
-    def __init__(self, self_dcenter=0):
+    def __init__(self, self_dcenter='0'):
         # zookeeper data
         # Record guests which queried vmac,
         # to inform of VMs during live migration
@@ -320,8 +324,8 @@ class VmacManager(object):
     def del_vmac_query(self, vmac):
         self.vmac_to_queries.pop(vmac, None)
 
-    def update_query(self, vmac, mac):
-        self.vmac_to_queries[vmac][mac] = time.time()
+    def update_query(self, vmac, mac, query_time):
+        self.vmac_to_queries[vmac][mac] = query_time
 
     def create_dc_vmac(self, dcenter_str):
         """Generate MAC address for datacenter based on datacenter id.
@@ -734,10 +738,25 @@ class TenantManager(object):
 
 class RPCManager(object):
     """Manager RPC clients and Issue RPC calls"""
-    def __init__(self):
+    def __init__(self, self_dcenter='0'):
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
-        self.dcenter_to_info = parse_peer_dcenters(CONF.peer_dcenters)
+        self.self_dcenter = self_dcenter
+        self.dcenter_to_info = self.parse_peer_dcenters(CONF.peer_dcenters)
         self.dcenter_to_rpc = {}
+
+    def parse_peer_dcenters(self, peer_dcenters, out_sep=';', in_sep=','):
+        """Convert string to dictionary"""
+
+        peer_dcs_dic = {}
+        if not peer_dcenters:
+            return peer_dcs_dic
+
+        peer_dcs_list = peer_dcenters.split(out_sep)
+        for peer_dc in peer_dcs_list:
+            peer_list = peer_dc.split(in_sep)
+            peer_dcs_dic[peer_list[0]] = (peer_list[1], peer_list[2])
+
+        return peer_dcs_dic
 
     def _setup_rpc_server_clients(self, inception_rpc):
         """Set up RPC server and RPC client to other controllers"""
@@ -756,6 +775,11 @@ class RPCManager(object):
             rpc_client = ServerProxy("http://%s:%s" %
                                           (controller_ip, CONF.rpc_port))
             self.dcenter_to_rpc[dcenter] = rpc_client
+
+    def get_dcenters(self):
+        peer_dcenters = self.dcenter_to_info.keys()
+        peer_dcenters.append(self.self_dcenter)
+        return peer_dcenters
 
     def rpc_redirect_flow(self, mac, dcenter_old, dpid_old, vmac_old,
                           vmac_new):
@@ -794,6 +818,10 @@ class RPCManager(object):
         for rpc_client in self.dcenter_to_rpc.values():
             rpc_client.revoke_vm_id(mac, vm_id, dpid)
 
+    def rpc_del_pos_in_zk(self, dcenter, dpid, port):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.del_pos_in_zk(dcenter, dpid, port)
+
 
 class ArpManager(object):
     """Maintain IP <=> MAC mapping"""
@@ -808,22 +836,15 @@ class ArpManager(object):
         if ip in self.ip_to_mac:
             return
 
-        if CONF.zookeeper_storage:
-            zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
-            if self.arp_mapping.mapping_exist(ip):
-                self.zk.set_data(zk_path_ip, mac)
-            else:
-                self.zk.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
         self.mac_to_ip[mac] = ip
         LOGGER.info("Update: (ip=%s) => (mac=%s)", ip, mac)
 
-    def learn_arp_mapping(self, ip, mac, rpc_manager):
+    def learn_arp_mapping(self, ip, mac):
         if ip in self.ip_to_mac:
             return
 
         self.update_mapping(ip, mac)
-        rpc_manager.rpc_update_arp(ip, mac)
 
     def del_mapping(self, ip, mac):
         del self.ip_to_mac[ip]
@@ -839,6 +860,148 @@ class ArpManager(object):
         return (ip in self.ip_to_mac)
 
 
+class ZkManager(object):
+    """Manage data storage and fetch in zookeeper"""
+    # Failover type
+    MIGRATION = "migration"
+    SOURCE_LEARNING = "source_learning"
+    ARP_LEARNING = "arp_learning"
+    RPC_REDIRECT_FLOW = "rpc_redirect_flow"
+    RPC_GATEWAY_FLOW = "rpc_gateway_flow"
+
+    def __init__(self, zk_storage=False):
+        # zk_storage: Decide whether to use zookeeper (True) or not (False)
+        self.zk_storage = zk_storage
+        if self.zk_storage:
+            self.pos_path = "/pos"
+            self.arp_path = "/arp"
+            self.log_path = "/log"
+
+            zk_logger = logging.getLogger('kazoo')
+            zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
+            zk_logger.setLevel(zk_log_level)
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(zk_log_level)
+            console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
+            zk_logger.addHandler(console_handler)
+            self.zk = client.KazooClient(hosts=CONF.zk_servers,
+                                         logger=zk_logger)
+            self.zk.start()
+            self.zk.ensure_path(self.pos_path)
+            self.zk.ensure_path(self.arp_path)
+            self.zk.ensure_path(self.log_path)
+
+    def load_data(self, arp_manager, switch_manager, vm_manager, vmac_manager,
+                  tenant_manager):
+        """Initiate local caches"""
+        # arp_manager
+        for ip_unicode in self.zk.get_children(self.arp_path):
+            ip = ip_unicode.encode('Latin-1')
+            ip_path = os.path.join(self.arp_path, ip)
+            mac, _ = self.zk.get(ip_path)
+            arp_manager.update_mapping(ip, mac)
+
+        # switch_manager & vm_manager & vmac_manager
+        # Load switch id, vm_id, vm_position and create vmac
+        for dcenter_unicode in self.zk.get_children(self.pos_path):
+            dcenter = dcenter_unicode.encode('Latin-1')
+            dc_path = os.path.join(self.pos_path, dcenter)
+            for dpid_unicode in self.zk.get_children(dc_path):
+                dpid = dpid_unicode.encode('Latin-1')
+                dpid_path = os.path.join(dc_path, dpid)
+                id_str, _ = self.zk.get(dpid_path)
+                switch_manager.update_swc_id(dcenter, dpid, int(id_str))
+                vmac_manager.create_swc_vmac(dcenter, dpid, int(id_str))
+                for port_unicode in self.zk.get_children(dpid_path):
+                    port_str = port_unicode.encode('Latin-1')
+                    port_path = os.path.join(dpid_path, port_str)
+                    for mac_unicode in self.zk.get_children(port_path):
+                        mac = mac_unicode.encode('Latin-1')
+                        mac_path = os.path.join(port_path, mac)
+                        mac_id, _ = self.zk.get(mac_path)
+                        switch_manager.invalidate_vm_id(dpid, mac_id)
+                        vm_manager.update_position(mac, dcenter, dpid,
+                                                   int(port_str))
+                        vm_manager.update_vm_id(mac, mac_id)
+                        vm_vmac = vmac_manager.create_vm_vmac(mac,
+                                                              tenant_manager,
+                                                              vm_manager)
+                        for qmac_unicode in self.zk.get_children(mac_path):
+                            qmac = qmac_unicode.encode('Latin-1')
+                            qmac_path = os.path.join(mac_path, qmac)
+                            query_time, _ = self.zk.get(qmac_path)
+                            vmac_manager.update_query(vm_vmac, qmac,
+                                                      query_time)
+
+    def init_dcenter(self, dcenters):
+        if self.zk_storage:
+            for dcenter in dcenters:
+                zk_path = os.path.join(self.pos_path, dcenter)
+                self.zk.ensure_path(zk_path)
+
+    def log_dpid_id(self, dcenter, dpid, swc_id):
+        if self.zk_storage:
+            zk_path = os.path.join(self.pos_path, dcenter, dpid)
+            self.zk.create(zk_path, str(swc_id), makepath=True)
+
+    def log_vm_id(self, dcenter, dpid, port, mac, vm_id):
+        if self.zk_storage:
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port),
+                                   mac)
+            self.zk.set(zk_path, str(vm_id))
+
+    def log_vm_position(self, dcenter, dpid, port, mac):
+        if self.zk_storage:
+            zk_port_path = os.path.join(self.pos_path, dcenter, dpid,
+                                        str(port))
+            self.zk.ensure_path(zk_port_path)
+            zk_mac_path = os.path.join(zk_port_path, mac)
+            self.zk.create(zk_mac_path, makepath=True)
+
+    def del_vm_position(self, dcenter, dpid, port):
+        # Delete the port znode, along with the mac being its sub-node
+        if self.zk_storage:
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port))
+            self.zk.delete(zk_path, recursive=True)
+
+    def log_arp_mapping(self, ip, mac):
+        if self.zk_storage:
+            zk_path = os.path.join(self.arp_path, ip)
+            self.zk.create(zk_path, mac, makepath=True)
+
+    def log_query_mac(self, dcenter, dpid, port, mac, query_mac, query_time):
+        if self.zk_storage:
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port),
+                                   mac, query_mac)
+            self.zk.ensure_path(zk_path)
+            self.zk.set(zk_path, str(query_time))
+
+    def create_failover_log(self, log_type, data_tuple):
+        """Failover logging"""
+        if self.zk_storage:
+            log_data = tuple_to_str(data_tuple)
+            log_path = os.path.join(self.log_path, log_type)
+            self.zk.create(log_path, log_data)
+
+    def delete_failover_log(self, log_type):
+        """Delete failover logging"""
+        if self.zk_storage:
+            log_path = os.path.join(self.log_path, log_type)
+            self.zk.delete(log_path)
+
+    def get_failover_logs(self):
+        failover_node = self.zk.get_children(self.log_path)
+        if not failover_node:
+            return None
+
+        for znode_unicode in failover_node:
+            znode = znode_unicode.encode('Latin-1')
+            log_path = os.path.join(CONF.zk_failover, znode)
+            data, _ = self.zk.get(log_path)
+            data_tuple = str_to_tuple(data)
+        return (znode, data_tuple)
+
+
 def tuple_to_str(data_tuple, sep=','):
     """Convert tuple to string."""
 
@@ -851,18 +1014,3 @@ def str_to_tuple(data_string, sep=','):
 
     data_tuple = tuple(data_string.split(sep))
     return data_tuple
-
-
-def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
-    """Convert string to dictionary"""
-
-    peer_dcs_dic = {}
-    if not peer_dcenters:
-        return peer_dcs_dic
-
-    peer_dcs_list = peer_dcenters.split(out_sep)
-    for peer_dc in peer_dcs_list:
-        peer_list = peer_dc.split(in_sep)
-        peer_dcs_dic[peer_list[0]] = (peer_list[1], peer_list[2])
-
-    return peer_dcs_dic

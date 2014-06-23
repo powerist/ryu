@@ -126,11 +126,3 @@ its virtual "MAC" address.
 {dpid => vmac}
 """
 DPID_TO_VMAC = os.path.join(CONF.zk_data, 'dpid_to_vmac')
-
-# Failover type
-MIGRATION = "migration"
-SOURCE_LEARNING = "source_learning"
-ARP_LEARNING = "arp_learning"
-RPC_REDIRECT_FLOW = "rpc_redirect_flow"
-RPC_GATEWAY_FLOW = "rpc_gateway_flow"
-

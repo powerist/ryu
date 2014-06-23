@@ -65,10 +65,12 @@ def main():
     zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
     zk.start()
 
-    LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_data)
-    zk.delete(CONF.zk_data, recursive=True)
-    LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_failover)
-    zk.delete(CONF.zk_failover, recursive=True)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', '/pos')
+    zk.delete('/pos', recursive=True)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', '/arp')
+    zk.delete('/arp', recursive=True)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', '/log')
+    zk.delete('/log', recursive=True)
     LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_election)
     zk.delete(CONF.zk_election, recursive=True)
 
