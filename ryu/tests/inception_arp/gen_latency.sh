@@ -1,12 +1,12 @@
 #!/bin/bash
 
-if [ $# -ne "2" ]; then
-    echo "usage: generate_latency <data file from collect_data.sh> <output file name>"
+if [ $# -ne "1" ]; then
+    echo "usage: generate_latency <data file from collect_data.sh>"
     exit 1
 fi
 
 input_file=$1
-test_name=$2
+test_name=$input_file
 
 if [ -a $input_file ]; then 
     cat $input_file | awk {'print $9'} | cut -f 1 -d ',' > $test_name.all

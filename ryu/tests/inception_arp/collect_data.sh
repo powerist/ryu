@@ -1,48 +1,74 @@
-#!/bin/bash
+#!/usr/bin/env python
 
-SSHS='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+import subprocess
+import sys
+import threading
+import traceback
 
-function check_ip {
-    a3=`echo $1 | cut -f 3 -d '.'`
-    a4=`echo $1 | cut -f 4 -d '.'`
+SCPS='scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
-    b3=`echo $2 | cut -f 3 -d '.'`
-    b4=`echo $2 | cut -f 4 -d '.'`
-    
-    if [ $(($a3/10)) -ne $(($b3/10)) ]; then
-        echo "inter_dc"
-    else 
-        if [ $a3 -ne $b3 ]; then
-            echo "inter_host"
-        else 
-            echo "same_host"
-        fi
-    fi
-}
+if len(sys.argv) < 2:
+    print "usage: collect_data <output_file> <tail_line=600> <head_line=300>"
+    sys.exit()
+output_file = sys.argv[1]
+tail_line = sys.argv[2] if len(sys.argv) >= 3 else 600
+head_line = sys.argv[3] if len(sys.argv) >= 4 else 300
 
-function tag_location {
-while read line; do
-    local_ip=`echo $line | cut -f 3 -d  ' '`
-    peer_ip=`echo $line | cut -f 1 -d  ' '`
-    r=`check_ip $local_ip, $peer_ip`
-    echo "$line,$r"
-done 
-}
+def exec_cmd(cmd):
+    print(('-' * 15 + ' %s ') % cmd)
+    proc = subprocess.Popen(['/bin/bash', '-c', cmd])
+    proc.communicate()            
 
-function get_single_node_data {
-     $SSHS $1 "grep -v skip ping.log |grep -A 1 ARPING  |grep -v ^-- |sed -e 's/ARPING //' |sed -e 's/^.*time=\(.*\)/\1/' |paste - - -d,|grep -v 10.2.99.0 " | perl -ne 's/([0-9]+\.[0-9]+) (usec)/($2?$1\/1000:$1)." msec"/e; s/msec//; print "".$_' | tail -n +600 |head -300 | tag_location
-}
+def process_in_parallel(cmds):
+    try:
+        threads = []
+        # execute each command
+        for cmd in cmds:
+            thread = threading.Thread(target=exec_cmd, args=(cmd,))
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+    except Exception:
+        print(traceback.format_exc())
 
-if [ $# -ne "1" ]; then
-    echo "usage: collect_data <output_file>"
-    exit 1
-fi
+######################################################### retrieve data (in parallel: Map)
+cmds = []
+for line in open('vm_ip.txt'):
+    ip = line.strip()
+    cmd = SCPS + ' %s:%s %s' % (ip, '~/ping.log', '/tmp/ping.log.%s' % ip)
+    cmds.append(cmd)
 
-filename=$1
-rm -f $filename
-touch $filename
+process_in_parallel(cmds)        
 
-for ip in `cat vm_ip.txt`; do
-    printf "getting data from %s: %d\n" $ip $?
-    get_single_node_data $ip >> $1
-done
+######################################################### transform data (in parallel: Map)
+cmds = []
+for line in open('vm_ip.txt'):
+    ip = line.strip()
+    cmd = """cat /tmp/ping.log.%s | grep -v skip |grep -A 1 ARPING  |grep -v ^-- |sed -e 's/ARPING //' |sed -e 's/^.*time=\(.*\)/\1/' |paste - - -d,|grep -v 10.2.99.0 | perl -ne 's/([0-9]+\.[0-9]+) (usec)/($2?$1\/1000:$1)." msec"/e; s/msec//; print "".$_' | tail -n +%s |head -%s > /tmp/ping.out.%s""" % (ip, tail_line, head_line, ip)
+    cmds.append(cmd)
+        
+process_in_parallel(cmds)        
+
+######################################################### combine data (single-thread: Reduce)
+def check_ip(ip1, ip2):
+    parts1 = ip1.split('.')
+    parts2 = ip2.split('.')
+    if int(parts1[2]) / 10 != int(parts2[2]) / 10:
+        return 'inter_dc'
+    elif parts1[2] != parts2[2]:
+        return 'inter_host'
+    else:
+        return 'same_host'
+
+fout = open(output_file, 'w')
+for ip in open('vm_ip.txt'):
+    ip = ip.strip()
+    for line in open('/tmp/ping.out.%s' % ip):
+        line = line.strip()
+        items = line.split(' ')
+        local_ip = items[2]
+        peer_ip = items[0]
+        fout.write(line + ',' + check_ip(local_ip, peer_ip) + '\n')
+
+fout.close()
