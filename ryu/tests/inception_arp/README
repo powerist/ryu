@@ -19,7 +19,7 @@ typical test procedure:
 
 make sure ssh connection is setup. 
 
-0) network_tune.sh & check_alive.sh & copy_to_vm.sh (run_test.sh calc_exp vm_ip.txt util.sh)
+0) util.sh & compute_ip.txt & vm_ip.txt & network_tune.sh & check_alive.sh & copy_to_vm.sh (run_test.sh calc_exp vm_ip.txt)
 
 1) start_ping.sh 
 
