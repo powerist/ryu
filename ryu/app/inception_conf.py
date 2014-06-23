@@ -74,12 +74,9 @@ CONF.register_opts([
     cfg.StrOpt('peer_dcenters',
                default="",
                help=("Neighbor datacenter information\n"
-                     "Format: <dc2_id,dc2_controller_ip,dc2_gateway_ip>;...\n"
-                     "E.g., 2,8.8.8.1,8.8.8.2;3,8.8.8.5,8.8.8.7"
+                     "Format: <dc2_id,dc2_controller_ip>;...\n"
+                     "E.g., 2,8.8.8.1;3,8.8.8.5"
                      )),
-    cfg.BoolOpt('arp_bcast',
-                default=False,
-                help='Enable/Disable ARP broadcast'),
     cfg.BoolOpt('forwarding_bcast',
                 default=False,
                 help='Enable/Disable all-to-all broadcast'),

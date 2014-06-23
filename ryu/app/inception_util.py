@@ -16,15 +16,23 @@
 #    under the License.
 
 """Inception utilities"""
+import os
+import time
 
 from collections import defaultdict
+from collections import deque
 import logging
 
 from oslo.config import cfg
+from SimpleXMLRPCServer import SimpleXMLRPCServer
+import socket
+from xmlrpclib import ServerProxy
 
 from ryu.lib.dpid import str_to_dpid
 from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_priority as i_priority
+from ryu.app import inception_conf as i_conf
+from ryu.lib import hub
 from ryu.ofproto import ether
 from ryu.ofproto import inet
 
@@ -36,6 +44,7 @@ CONF.import_opt('gateway_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_ip', 'ryu.app.inception_conf')
 CONF.import_opt('dhcp_port', 'ryu.app.inception_conf')
 CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
+CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 CONF.import_opt('interdcenter_port_prefix', 'ryu.app.inception_conf')
 CONF.import_opt('intradcenter_port_prefix', 'ryu.app.inception_conf')
 
@@ -71,10 +80,11 @@ class Topology(object):
         self.parse_switch_ports(dpid_new, ip_new, ports)
         if ip_new == CONF.dhcp_ip:
             self.dhcp_switch = dpid_new
+            LOGGER.info("DHCP server switch: (ip=%s), (dpid=%s)", ip_new,
+                        dpid_new)
         if ip_new == CONF.gateway_ip:
             self.gateway = dpid_new
-            LOGGER.info("Gateway switch: (ip=%s), (dpid=%s)", ip_new,
-                        self.gateway)
+            LOGGER.info("Gateway switch: (ip=%s), (dpid=%s)", ip_new, dpid_new)
 
     def parse_switch_ports(self, dpid, ip, switch_ports):
         """Parse port name to extract connection information"""
@@ -138,71 +148,189 @@ class Topology(object):
 
         return dpid == self.gateway
 
+    def get_gateway(self):
+        return self.gateway
+
     def is_dhcp(self, dpid):
         """Check if dpid is dhcp server"""
 
         return dpid == self.dhcp_switch
 
+    def get_fwd_port(self, dpid1, dpid2):
+        return self.dpid_to_dpid[dpid1][dpid2]
+
+    def get_dcenter_port(self, dcenter):
+        return self.gateway_to_dcenters[self.gateway][dcenter]
+
+    def get_neighbors(self, dpid):
+        return self.dpid_to_dpid[dpid]
+
+
+class SwitchManager(object):
+    """Manage openflow-switches"""
+    SWITCH_MAXID = 65535
+
+    def __init__(self, self_dcenter=0):
+        # Zookeeper data
+        # Record all switches id assignment, to detect switch id conflict
+        # {dcenter => {dpid => id}}
+        self.dcenter_to_swcids = defaultdict(dict)
+
+        # Local cache
+        self.self_dcenter = self_dcenter
+        # Record available ids of each switch which can be assigned to VMs
+        # {dpid => deque(available ids)}
+        self.dpid_to_vmids = defaultdict(deque)
+
+    def add_local_switch(self, dpid):
+        self.dpid_to_vmids[dpid] = deque(xrange(self.SWITCH_MAXID))
+        switch_id = self.generate_swc_id(dpid)
+
+        return switch_id
+
+    def create_vm_id(self, dpid):
+        try:
+            vm_id = self.dpid_to_vmids[dpid].pop()
+            return vm_id
+        except IndexError:
+            return None
+
+    def recollect_vm_id(self, vm_id, dpid):
+        self.dpid_to_vmids[dpid].appendleft(vm_id)
+
+    def generate_swc_id(self, dpid):
+        """Create switch id"""
+        switch_id = (hash(dpid) % self.SWITCH_MAXID) + 1
+        local_ids = self.dcenter_to_swcids[self.self_dcenter]
+        if switch_id in local_ids.values():
+            # TODO(chen): Hash conflict
+            LOGGER.info("ERROR: switch id conflict: ", switch_id)
+        else:
+            local_ids[dpid] = switch_id
+
+        return switch_id
+
+    def update_swc_id(self, dcenter, dpid, switch_id):
+        self.dcenter_to_swcids[dcenter][dpid] = switch_id
+        # TOZOO
+
+    def get_swc_id(self, dcenter, dpid):
+        return self.dcenter_to_swcids[dcenter].get(dpid)
+
+
+class VmManager(object):
+    """Manage virtual machines in the network"""
+    VM_MAXID = 65535
+
+    def __init__(self):
+        # Local cache
+        # Record VM's vm_id, to facilitate vmac generation
+        self.mac_to_id = {}
+        # Record VM's positions, to facilitate detecting live migration
+        # {mac => (dcenter, dpid, port)}
+        self.mac_to_position = {}
+
+    def update_position(self, mac, dcenter, dpid, port):
+        """Update guest MAC and its connected switch"""
+        pos_tuple = (dcenter, dpid, port)
+        if CONF.zookeeper_storage:
+            zk_data = tuple_to_str(pos_tuple)
+            zk_path = os.path.join(i_conf.MAC_TO_POSITION, mac)
+            if mac in self.mac_to_position:
+                self.zk.set(zk_path, zk_data)
+            else:
+                self.zk.create(zk_path, zk_data)
+        self.mac_to_position[mac] = pos_tuple
+        # TOZOO: Add port -> mac path
+
+        LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s)"
+                    , mac, dcenter, dpid, port)
+
+    def generate_vm_id(self, mac, dpid, switch_manager):
+        """Generate a new vm_id, 00 is saved for switch"""
+        vm_id = switch_manager.create_vm_id(dpid)
+        self.mac_to_id[mac] = vm_id
+
+        return vm_id
+
+    def revoke_vm_id(self, mac, vm_id):
+        if self.mac_to_id[mac] != vm_id:
+            return False
+        del self.mac_to_id[mac]
+
+    def update_vm_id(self, mac, vm_id):
+        self.mac_to_id[mac] = vm_id
+
+    def get_position(self, mac):
+        return self.mac_to_position.get(mac)
+
+    def get_vm_id(self, mac):
+        return self.mac_to_id.get(mac)
+
+    def mac_exists(self, mac):
+        return (mac in self.mac_to_position)
+
+    def position_shifts(self, mac, dcenter, dpid, port):
+        if mac not in self.mac_to_position:
+            return False
+        else:
+            pos_old = self.mac_to_position[mac]
+            return (pos_old != (dcenter, dpid, port))
+
 
 class VmacManager(object):
     """
-    Manage vmacs of VMs, switches and datacenters
+    Create vmacs of VMs, switches and datacenters
     """
     DCENTER_MASK = "ff:ff:00:00:00:00"
     SWITCH_MASK = "ff:ff:ff:ff:00:00"
     TENANT_MASK = "00:00:00:00:00:ff"
-    SWITCH_MAXID = 65535
-    VM_MAXID = 65535
 
-    def __init__(self):
-        # Record switch id assignment
-        self.switch_id_slots = [False] * (self.SWITCH_MAXID + 1)
-        # Record vm id assignment of each switch
-        self.dpid_to_vmidlist = defaultdict(list)
-        # Datacenter virtual MAC
-        self.dcenter_to_vmac = {}
-        # Switch virtual MAC
+    def __init__(self, self_dcenter=0):
+        # zookeeper data
+        # Record guests which queried vmac,
+        # to inform of VMs during live migration
+        # {vmac => {mac => time}}
+        self.vmac_to_queries = defaultdict(dict)
+
+        # Local cache
+        # All Switches' virtual MAC, to facilitate vmac generation
+        # {dpid => vmac}
         self.dpid_to_vmac = {}
-        # VM virtual MAC
+
+        # All VMs' virtual MAC, to facilitate ARP resolution
+        # {mac => vmac}
         self.mac_to_vmac = {}
 
-    def update_switch(self, dcenter_id, dpid):
-        """Handle switch connection"""
-        if dpid not in self.dpid_to_vmidlist:
-            self.dpid_to_vmidlist[dpid] = [False] * (self.VM_MAXID + 1)
+    def get_query_macs(self, vmac):
+        if vmac not in self.vmac_to_queries:
+            return []
 
-        if dpid not in self.dpid_to_vmac:
-            dcenter_vmac = self.dcenter_to_vmac[dcenter_id]
-            switch_vmac = self.create_swc_vmac(dcenter_vmac, dpid)
-            self.dpid_to_vmac[dpid] = switch_vmac
-        else:
-            switch_vmac = self.dpid_to_vmac[dpid]
+        query_list = []
+        for mac_query in self.vmac_to_queries[vmac].keys():
+            time_now = time.time()
+            query_time = self.vmac_to_queries[vmac][mac_query]
+            if (time_now - query_time) > CONF.arp_timeout:
+                del self.vmac_to_queries[vmac][mac_query]
+            else:
+                query_list.append(mac_query)
 
-        return switch_vmac
+        return query_list
 
-    def update_dcenter(self, dcenter_id):
-        if dcenter_id not in self.dcenter_to_vmac:
-            dcenter_vmac = self.create_dc_vmac(int(dcenter_id))
-            self.dcenter_to_vmac[dcenter_id] = dcenter_vmac
+    def del_vmac_query(self, vmac):
+        self.vmac_to_queries.pop(vmac, None)
 
-    def generate_vm_id(self, vm_mac, dpid):
-        """Generate a new vm_id, 00 is saved for switch"""
-        #TODO(chen): Avoid hash conflict
-        vm_id = (hash(vm_mac) % self.VM_MAXID + 1)
-        if self.dpid_to_vmidlist[dpid][vm_id]:
-            LOGGER.info("WARNING: switch id conflict:"
-                        "vm_id=%s has been created for dpid=%s", vm_id, dpid)
-        else:
-            self.dpid_to_vmidlist[dpid][vm_id] = True
+    def update_query(self, vmac, mac):
+        self.vmac_to_queries[vmac][mac] = time.time()
 
-        return vm_id
-
-    def create_dc_vmac(self, dcenter):
+    def create_dc_vmac(self, dcenter_str):
         """Generate MAC address for datacenter based on datacenter id.
 
         Address form: xx:xx:00:00:00:00
         xx:xx is converted from data center id
         """
+        dcenter = int(dcenter_str)
+
         if dcenter > 65535:
             return
 
@@ -211,7 +339,7 @@ class VmacManager(object):
         dcenter_vmac = "%02x:%02x:00:00:00:00" % (dcenter_high, dcenter_low)
         return dcenter_vmac
 
-    def create_swc_vmac(self, dcenter_vmac, dpid):
+    def create_swc_vmac(self, dcenter, dpid, switch_id):
         """Generate MAC address prefix for switch based on
         datacenter id and switch id.
 
@@ -219,35 +347,32 @@ class VmacManager(object):
         xx:xx is converted from data center id
         yy:yy is converted from switch id
         """
+        dcenter_vmac = self.create_dc_vmac(dcenter)
         dcenter_prefix = self.get_dc_prefix(dcenter_vmac)
 
-        switch_num = (hash(dpid) % self.SWITCH_MAXID) + 1
-        if self.switch_id_slots[switch_num]:
-            LOGGER.info("ERROR: switch id conflict: ", switch_num)
-        else:
-            self.switch_id_slots[switch_num] = True
-
-        switch_high = (switch_num >> 8) & 0xff
-        switch_low = switch_num & 0xff
+        switch_high = (switch_id >> 8) & 0xff
+        switch_low = switch_id & 0xff
         switch_suffix = ("%02x:%02x:00:00" % (switch_high, switch_low))
-        return ':'.join((dcenter_prefix, switch_suffix))
+        switch_vmac = ':'.join((dcenter_prefix, switch_suffix))
+        self.dpid_to_vmac[dpid] = switch_vmac
+        return switch_vmac
 
-    def create_vm_vmac(self, vm_mac, switch_vmac, vm_id, tenant_id):
+    def create_vm_vmac(self, mac, tenant_manager, vm_manager):
         """Generate virtual MAC address of a VM"""
-
+        (_, dpid, _) = vm_manager.get_position(mac)
+        switch_vmac = self.dpid_to_vmac[dpid]
         switch_prefix = self.get_swc_prefix(switch_vmac)
+        vm_id = vm_manager.get_vm_id(mac)
         vm_id_hex = vm_id & 0xff
         vm_id_suffix = "%02x" % vm_id_hex
+
+        tenant_id = tenant_manager.get_tenant_id(mac)
         tenant_id_hex = tenant_id & 0xff
         tenant_id_suffix = "%02x" % tenant_id_hex
         vmac = ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
-        self.mac_to_vmac[vm_mac] = vmac
-        LOGGER.info("Update: (mac=%s) => (vmac=%s)", vm_mac, vmac)
-        return vmac
-
-    def update_vm_vmac(self, mac, vmac):
         self.mac_to_vmac[mac] = vmac
-        LOGGER.info("Update: (mac=%s) => (vmac=%s)", mac, vmac)
+        LOGGER.info("Create: (mac=%s) => (vmac=%s)", mac, vmac)
+        return vmac
 
     def get_swc_prefix(self, vmac):
         """Extract switch prefix from virtual MAC address"""
@@ -256,6 +381,12 @@ class VmacManager(object):
     def get_dc_prefix(self, vmac):
         """Extract switch prefix from virtual MAC address"""
         return vmac[:5]
+
+    def get_vm_vmac(self, mac):
+        return self.mac_to_vmac.get(mac)
+
+    def get_swc_vmac(self, dpid):
+        return self.dpid_to_vmac.get(dpid)
 
 
 class FlowManager(object):
@@ -299,7 +430,7 @@ class FlowManager(object):
         """Set up flows on gateway switches to other datacenters"""
         dcenter_to_port = topology.gateway_to_dcenters[dpid_gw].items()
         for (dcenter, port_no) in dcenter_to_port:
-            peer_dc_vmac = vmac_manager.dcenter_to_vmac[dcenter]
+            peer_dc_vmac = vmac_manager.create_dc_vmac(dcenter)
             self.set_topology_flow(dpid_gw, peer_dc_vmac,
                                    VmacManager.DCENTER_MASK, port_no)
 
@@ -307,22 +438,22 @@ class FlowManager(object):
         """Set up flows on non-gateway switches to other datacenters"""
         # TODO(chen): Multiple gateways
         dpid_gw = topology.gateway
-        gw_fwd_port = topology.dpid_to_dpid[dpid][dpid_gw]
+        gw_fwd_port = topology.get_fwd_port(dpid, dpid_gw)
         for dcenter in topology.gateway_to_dcenters[dpid_gw]:
-            peer_dc_vmac = vmac_manager.dcenter_to_vmac[dcenter]
+            peer_dc_vmac = vmac_manager.create_dc_vmac(dcenter)
             self.set_topology_flow(dpid, peer_dc_vmac,
                                    VmacManager.DCENTER_MASK, gw_fwd_port)
 
     def set_interswitch_flows(self, dpid, topology, vmac_manager):
         """Set up flows connecting the new switch(dpid) and
         all existing switches"""
-        for (peer_dpid, fwd_port) in topology.dpid_to_dpid[dpid].items():
-            peer_vmac = vmac_manager.dpid_to_vmac[peer_dpid]
+        for (peer_dpid, fwd_port) in topology.get_neighbors(dpid).items():
+            peer_vmac = vmac_manager.get_swc_vmac(peer_dpid)
             self.set_topology_flow(dpid, peer_vmac,
                                    VmacManager.SWITCH_MASK, fwd_port)
 
-            self_vmac = vmac_manager.dpid_to_vmac[dpid]
-            peer_port = topology.dpid_to_dpid[peer_dpid][dpid]
+            self_vmac = vmac_manager.get_swc_vmac(dpid)
+            peer_port = topology.get_fwd_port(peer_dpid, dpid)
             self.set_topology_flow(peer_dpid, self_vmac,
                                    VmacManager.SWITCH_MASK, peer_port)
 
@@ -360,7 +491,7 @@ class FlowManager(object):
         during live migration to prevent
         unnecessary multi-datacenter traffic"""
         dpid_gw = topology.gateway
-        gw_fwd_port = topology.dpid_to_dpid[dpid_gw][dpid]
+        gw_fwd_port = topology.get_fwd_port(dpid_gw, dpid)
         datapath_gw = self.dpset.get(str_to_dpid(dpid_gw))
         ofproto = datapath_gw.ofproto
         ofproto_parser = datapath_gw.ofproto_parser
@@ -601,15 +732,98 @@ class TenantManager(object):
             return TenantManager.DEFAULT_TENANT_ID
 
 
-class ArpMapping(object):
+class RPCManager(object):
+    """Manager RPC clients and Issue RPC calls"""
+    def __init__(self):
+        # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
+        self.dcenter_to_info = parse_peer_dcenters(CONF.peer_dcenters)
+        self.dcenter_to_rpc = {}
+
+    def _setup_rpc_server_clients(self, inception_rpc):
+        """Set up RPC server and RPC client to other controllers"""
+        # RPC server
+        host_addr = socket.gethostbyname(socket.gethostname())
+        rpc_server = SimpleXMLRPCServer((host_addr, CONF.rpc_port),
+                                        allow_none=True)
+        rpc_server.register_introspection_functions()
+        rpc_server.register_instance(inception_rpc)
+        # server_thread = threading.Thread(target=rpc_server.serve_forever)
+        hub.spawn(rpc_server.serve_forever)
+
+        # Create RPC clients
+        for dcenter in self.dcenter_to_info:
+            controller_ip, _ = self.dcenter_to_info[dcenter]
+            rpc_client = ServerProxy("http://%s:%s" %
+                                          (controller_ip, CONF.rpc_port))
+            self.dcenter_to_rpc[dcenter] = rpc_client
+
+    def rpc_redirect_flow(self, mac, dcenter_old, dpid_old, vmac_old,
+                          vmac_new):
+        rpc_client_old = self.dcenter_to_rpc[dcenter_old]
+        rpc_client_old.redirect_local_flow(dpid_old, mac, vmac_old, vmac_new)
+
+    def rpc_gateway_redirect_flows(self, mac, vmac_old, vmac_new, dcenter_new):
+        for dcenter in self.dcenter_to_info:
+            rpc_client = self.dcenter_to_rpc[dcenter]
+            rpc_client.set_gateway_flow(mac, vmac_old, vmac_new, dcenter_new)
+
+    def get_rpc_client(self, dcenter):
+        return self.dcenter_to_rpc.get(dcenter)
+
+    def rpc_update_position(self, mac, dcenter_id, dpid, port):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_position(mac, dcenter_id, dpid, port)
+
+    def rpc_update_vmac(self, mac, vmac):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_vmac(mac, vmac)
+
+    def rpc_update_arp(self, ip, mac):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_arp_mapping(ip, mac)
+
+    def rpc_update_swcid(self, dcenter, dpid, switch_id):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_swc_id(dcenter, dpid, switch_id)
+
+    def rpc_update_vmid(self, mac, vm_id):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.update_vm_id(mac, vm_id)
+
+    def rpc_revoke_vmid(self, mac, vm_id, dpid):
+        for rpc_client in self.dcenter_to_rpc.values():
+            rpc_client.revoke_vm_id(mac, vm_id, dpid)
+
+
+class ArpManager(object):
     """Maintain IP <=> MAC mapping"""
     def __init__(self):
+        # Data stored in zookeeper
         self.ip_to_mac = {}
+
+        # Local cache
         self.mac_to_ip = {}
 
     def update_mapping(self, ip, mac):
+        if ip in self.ip_to_mac:
+            return
+
+        if CONF.zookeeper_storage:
+            zk_path_ip = os.path.join(i_conf.IP_TO_MAC, ip)
+            if self.arp_mapping.mapping_exist(ip):
+                self.zk.set_data(zk_path_ip, mac)
+            else:
+                self.zk.create(zk_path_ip, mac)
         self.ip_to_mac[ip] = mac
         self.mac_to_ip[mac] = ip
+        LOGGER.info("Update: (ip=%s) => (mac=%s)", ip, mac)
+
+    def learn_arp_mapping(self, ip, mac, rpc_manager):
+        if ip in self.ip_to_mac:
+            return
+
+        self.update_mapping(ip, mac)
+        rpc_manager.rpc_update_arp(ip, mac)
 
     def del_mapping(self, ip, mac):
         del self.ip_to_mac[ip]
@@ -652,6 +866,3 @@ def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
         peer_dcs_dic[peer_list[0]] = (peer_list[1], peer_list[2])
 
     return peer_dcs_dic
-
-
-
