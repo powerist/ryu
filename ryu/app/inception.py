@@ -16,18 +16,15 @@
 #    under the License.
 
 import logging
-import os
 
-from kazoo import client
-from kazoo import exceptions as kazoo_exc
 from oslo.config import cfg
 import traceback
 
 from ryu.app import inception_arp as i_arp
-from ryu.app import inception_conf as i_conf
 from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_rpc as i_rpc
 from ryu.app import inception_util as i_util
+from ryu.app.inception_util import ZkManager
 from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import handler
@@ -39,7 +36,6 @@ from ryu.lib.packet import udp
 from ryu.lib.packet import dhcp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import packet
-from ryu import log
 from ryu.ofproto import ether
 from ryu.ofproto import inet
 
@@ -48,7 +44,6 @@ LOGGER = logging.getLogger(__name__)
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
-CONF.import_opt('zk_data', 'ryu.app.inception_conf')
 CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 CONF.import_opt('ip_prefix', 'ryu.app.inception_conf')
@@ -86,7 +81,15 @@ class Inception(app_manager.RyuApp):
         self.arp_manager = i_util.ArpManager()
         self.switch_manager = i_util.SwitchManager(self.dcenter_id)
         self.vm_manager = i_util.VmManager()
-        self.rpc_manager = i_util.RPCManager()
+        self.rpc_manager = i_util.RPCManager(self.dcenter_id)
+        self.zk_manager = i_util.ZkManager(CONF.zookeeper_storage)
+        dcenters = self.rpc_manager.get_dcenters()
+        self.zk_manager.init_dcenter(dcenters)
+        self.zk_manager.load_data(arp_manager=self.arp_manager,
+                                  switch_manager=self.switch_manager,
+                                  vm_manager=self.vm_manager,
+                                  vmac_manager=self.vmac_manager,
+                                  tenant_manager=self.tenant_manager)
 
         self.switch_count = 0
         ## Inception relevent modules
@@ -97,44 +100,6 @@ class Inception(app_manager.RyuApp):
         # RPC
         self.inception_rpc = i_rpc.InceptionRpc(self)
         self.rpc_manager._setup_rpc_server_clients(self.inception_rpc)
-
-        if CONF.zookeeper_storage:
-            self._load_data()
-
-    def _load_data(self):
-        """Load network data from storage backend into controller """
-
-        zk_logger = logging.getLogger('kazoo')
-        zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
-        zk_logger.setLevel(zk_log_level)
-        zk_console_handler = logging.StreamHandler()
-        zk_console_handler.setLevel(zk_log_level)
-        zk_console_handler.setFormatter(logging.Formatter(CONF.log_formatter))
-        zk_logger.addHandler(zk_console_handler)
-        self.zk = client.KazooClient(hosts=CONF.zk_servers, logger=zk_logger)
-        self.zk.start()
-
-        self.zk.ensure_path(CONF.zk_data)
-        self.zk.ensure_path(CONF.zk_failover)
-        self.zk.ensure_path(i_conf.MAC_TO_POSITION)
-        self.zk.ensure_path(i_conf.DPID_TO_VMAC)
-
-        self._load_data_entry(i_conf.MAC_TO_POSITION, self.mac_to_position)
-        # TODO(chen):
-        #self._load_data_entry(i_conf.DPID_TO_VMAC, self.dpid_to_vmac)
-
-    def _load_data_entry(self, zk_path, local_dic):
-        """Copy all data under zk_path in Zookeeper into local cache"""
-
-        for znode_unicode in self.zk.get_children(zk_path):
-            znode = znode_unicode.encode('Latin-1')
-            sub_path = os.path.join(zk_path, znode)
-            zk_data, _ = self.zk.get(sub_path)
-            if zk_path == i_conf.MAC_TO_POSITION:
-                zk_data_dic = i_util.str_to_tuple(zk_data)
-            else:
-                zk_data_dic = zk_data
-            local_dic[znode] = zk_data_dic
 
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
@@ -153,6 +118,7 @@ class Inception(app_manager.RyuApp):
             # Update topology
             self.topology.update_switch(dpid, ip, event.ports)
             switch_id = self.switch_manager.add_local_switch(dpid)
+            self.zk_manager.log_dpid_id(self.dcenter_id, dpid, switch_id)
             self.rpc_manager.rpc_update_swcid(self.dcenter_id, dpid, switch_id)
             self.vmac_manager.create_swc_vmac(self.dcenter_id, dpid, switch_id)
             if self.topology.is_gateway(dpid):
@@ -168,7 +134,8 @@ class Inception(app_manager.RyuApp):
                 self.inception_dhcp.update_server(self.topology.dhcp_switch,
                                                   self.topology.dhcp_port)
 
-            # do failover if all switches are connected and have a data backend
+            # do failover if all switches are connected
+            # TODO(chen): Failover
             if (self.switch_count == CONF.num_switches and
                     CONF.zookeeper_storage):
                 self._do_failover()
@@ -179,34 +146,32 @@ class Inception(app_manager.RyuApp):
         """Check if any work is left by previous controller.
         If so, continue the unfinished work.
         """
+        failover_log = self.zk_manager.get_failover_logs()
+        if failover_log is None:
+            return
 
-        failover_node = self.zk.get_children(CONF.zk_failover)
-        for znode_unicode in failover_node:
-            znode = znode_unicode.encode('Latin-1')
-            log_path = os.path.join(CONF.zk_failover, znode)
-            data, _ = self.zk.get(log_path)
-            data_tuple = i_util.str_to_tuple(data)
+        (znode, data_tuple) = failover_log
 
-            if znode == i_conf.SOURCE_LEARNING:
-                self.learn_new_vm(*data_tuple)
-                self.delete_failover_log(i_conf.SOURCE_LEARNING)
+        if znode == ZkManager.SOURCE_LEARNING:
+            self.learn_new_vm(*data_tuple)
+            self.zk_manager.delete_failover_log(ZkManager.SOURCE_LEARNING)
 
-            if znode == i_conf.ARP_LEARNING:
-                self.arp_manager.update_mapping(*data_tuple)
-                self.rpc_manager.rpc_update_arp(*data_tuple)
-                self.delete_failover_log(i_conf.ARP_LEARNING)
+        if znode == ZkManager.ARP_LEARNING:
+            self.arp_manager.update_mapping(*data_tuple)
+            self.rpc_manager.rpc_update_arp(*data_tuple)
+            self.zk_manager.delete_failover_log(ZkManager.ARP_LEARNING)
 
-            if znode == i_conf.MIGRATION:
-                self.handle_migration(*data_tuple)
-                self.delete_failover_log(i_conf.MIGRATION)
+        if znode == ZkManager.MIGRATION:
+            self.handle_migration(*data_tuple)
+            self.zk_manager.delete_failover_log(ZkManager.MIGRATION)
 
-            if znode == i_conf.RPC_GATEWAY_FLOW:
-                self.inception_rpc.set_gateway_flow(*data_tuple)
-                self.delete_failover_log(i_conf.RPC_GATEWAY_FLOW)
+        if znode == ZkManager.RPC_GATEWAY_FLOW:
+            self.inception_rpc.set_gateway_flow(*data_tuple)
+            self.zk_manager.delete_failover_log(ZkManager.RPC_GATEWAY_FLOW)
 
-            if znode == i_conf.RPC_REDIRECT_FLOW:
-                self.inception_rpc.redirect_local_flow(*data_tuple)
-                self.delete_failover_log(i_conf.RPC_REDIRECT_FLOW)
+        if znode == ZkManager.RPC_REDIRECT_FLOW:
+            self.inception_rpc.redirect_local_flow(*data_tuple)
+            self.zk_manager.delete_failover_log(ZkManager.RPC_REDIRECT_FLOW)
 
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
@@ -267,28 +232,33 @@ class Inception(app_manager.RyuApp):
         if not self.vm_manager.mac_exists(ethernet_src):
             # New VM
             log_tuple = (dpid, in_port, ethernet_src)
-            if CONF.zookeeper_storage:
-                self.create_failover_log(i_conf.SOURCE_LEARNING, log_tuple)
+
+            self.zk_manager.create_failover_log(ZkManager.SOURCE_LEARNING,
+                                                log_tuple)
             self.learn_new_vm(dpid, in_port, ethernet_src)
-            if CONF.zookeeper_storage:
-                self.delete_failover_log(i_conf.SOURCE_LEARNING)
+            self.zk_manager.delete_failover_log(ZkManager.SOURCE_LEARNING)
             return
 
         if self.vm_manager.position_shifts(ethernet_src, self.dcenter_id, dpid,
                                            in_port):
-            if CONF.zookeeper_storage:
-                self.create_failover_log(i_conf.MIGRATION, dpid, in_port)
-            self.handle_migration(ethernet_src, dpid, in_port)
-            if CONF.zookeeper_storage:
-                self.delete_failover_log(i_conf.MIGRATION)
+            pos_old = self.vm_manager.get_position(ethernet_src)
+            (dcenter_old, dpid_old, port_old) = pos_old
+            log_tuple = (ethernet_src, dcenter_old, dpid_old, port_old, dpid,
+                         in_port)
+            self.zk_manager.create_failover_log(ZkManager.MIGRATION, log_tuple)
+            self.handle_migration(ethernet_src, dcenter_old, dpid_old,
+                                  port_old, dpid, in_port)
+            self.zk_manager.delete_failover_log(ZkManager.MIGRATION)
 
     def learn_new_vm(self, dpid, port, mac):
         """Create vmac for new vm; Store vm position info;
         and install local forwarding flow"""
         self.vm_manager.update_position(mac, self.dcenter_id, dpid, port)
+        self.zk_manager.log_vm_position(self.dcenter_id, dpid, port, mac)
         self.rpc_manager.rpc_update_position(mac, self.dcenter_id, dpid, port)
 
         vm_id = self.vm_manager.generate_vm_id(mac, dpid, self.switch_manager)
+        self.zk_manager.log_vm_id(self.dcenter_id, dpid, port, mac, vm_id)
         self.rpc_manager.rpc_update_vmid(mac, vm_id)
 
         vmac = self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
@@ -297,37 +267,27 @@ class Inception(app_manager.RyuApp):
         self.flow_manager.set_tenant_filter(dpid, vmac, mac)
         self.flow_manager.set_local_flow(dpid, vmac, mac, port)
 
-    def create_failover_log(self, log_type, data_tuple):
-        """Failover logging"""
-
-        log_data = i_util.tuple_to_str(data_tuple)
-        log_path = os.path.join(CONF.zk_failover, log_type)
-        self.zk.create(log_path, log_data)
-
-    def delete_failover_log(self, log_type):
-        """Delete failover logging"""
-
-        log_path = os.path.join(CONF.zk_failover, log_type)
-        self.zk.delete(log_path)
-
-    def handle_migration(self, mac, dpid_new, port_new):
+    def handle_migration(self, mac, dcenter_old, dpid_old, port_old, dpid_new,
+                         port_new):
         """Set flows to handle VM migration properly"""
 
         LOGGER.info("Handle VM migration")
-        (dcenter_old, dpid_old, port_old) = self.vm_manager.get_position(mac)
         vmac_old = self.vmac_manager.get_vm_vmac(mac)
         if dcenter_old != self.dcenter_id:
             # Multi-datacenter migration
-            # Store vmac_new
+            # Update VM position
             self.vm_manager.update_position(mac, self.dcenter_id, dpid_new,
                                             port_new)
+            self.zk_manager.log_vm_position(self.dcenter_id, dpid_new,
+                                            port_new, mac)
+            self.zk_manager.del_vm_position(dcenter_old, dpid_old, port_old)
             self.rpc_manager.rpc_update_position(mac, self.dcenter_id,
                                                  dpid_new, port_new)
+            self.rpc_manager.rpc_del_pos_in_zk(dcenter_old, dpid_old, port_old)
 
             vmac_record = self.vmac_manager.get_vm_vmac(mac)
             if vmac_record == vmac_old:
                 # A new vmac has not been created
-
                 # Revoke old vm_id
                 vm_id_old = self.vm_manager.get_vm_id(mac)
                 self.vm_manager.revoke_vm_id(mac, vm_id_old)
@@ -336,6 +296,8 @@ class Inception(app_manager.RyuApp):
                 # Generate new vm_id
                 vm_id = self.vm_manager.generate_vm_id(mac, dpid_new,
                                                        self.switch_manager)
+                self.zk_manager.log_vm_id(self.dcenter_id, dpid_new, port_new,
+                                          mac, vm_id)
                 self.rpc_manager.rpc_update_vmid(mac, vm_id)
                 vmac_manager = self.vmac_manager
                 vmac_new = vmac_manager.create_vm_vmac(mac,
@@ -389,6 +351,8 @@ class Inception(app_manager.RyuApp):
                 # Generate new vm_id
                 vm_id = self.vm_manager.generate_vm_id(mac, dpid_new,
                                                        self.switch_manager)
+                self.zk_manager.log_vm_id(self.dcenter_id, dpid_new, port_new,
+                                          mac, vm_id)
                 self.rpc_manager.rpc_update_vmid(mac, vm_id)
                 vmac_manager = self.vmac_manager
                 vmac_new = vmac_manager.create_vm_vmac(mac,
@@ -399,11 +363,15 @@ class Inception(app_manager.RyuApp):
                 # TODO(chen): RPC call?
                 vmac_new = vmac_record
 
-            # Store vmac_new
+            # Update VM position
             self.vm_manager.update_position(mac, self.dcenter_id, dpid_new,
                                             port_new)
+            self.zk_manager.log_vm_position(self.dcenter_id, dpid_new,
+                                            port_new, mac)
+            self.zk_manager.del_vm_position(dcenter_old, dpid_old, port_old)
             self.rpc_manager.rpc_update_position(mac, self.dcenter_id,
                                                  dpid_new, port_new)
+            self.rpc_manager.rpc_del_pos_in_zk(dcenter_old, dpid_old, port_old)
             # Instruct dpid_old to redirect traffic
             fwd_port = self.topology.get_fwd_port(dpid_old, dpid_new)
             self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
