@@ -34,8 +34,6 @@ LOGGER = logging.getLogger('zk-cleanup')
 
 CONF = cfg.CONF
 CONF.import_opt('zk_servers', 'ryu.app.inception_conf')
-CONF.import_opt('zk_data', 'ryu.app.inception_conf')
-CONF.import_opt('zk_failover', 'ryu.app.inception_conf')
 CONF.import_opt('zk_election', 'ryu.app.inception_conf')
 CONF.import_opt('zk_log_level', 'ryu.app.inception_conf')
 

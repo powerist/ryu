@@ -20,7 +20,6 @@ import logging
 from oslo.config import cfg
 
 from ryu.lib.dpid import str_to_dpid
-
 from ryu.lib.packet import dhcp
 
 LOGGER = logging.getLogger(__name__)

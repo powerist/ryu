@@ -19,7 +19,6 @@ import time
 
 from oslo.config import cfg
 
-from ryu.app.inception_util import ZkManager
 from ryu.lib.dpid import str_to_dpid
 from ryu.lib.packet import arp
 from ryu.lib.packet import ethernet
@@ -49,26 +48,17 @@ class InceptionArp(object):
 
     def handle(self, dpid, in_port, arp_header):
         LOGGER.info("Handle ARP packet")
-
-        # ERROR: dst_mac unparsable from arp_header
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
 
         # Do {IP => MAC} learning
-        log_tuple = (src_ip, src_mac)
-
-        self.zk_manager.create_failover_log(ZkManager.ARP_LEARNING, log_tuple)
         if not self.arp_manager.mapping_exist(src_ip):
             self.arp_manager.learn_arp_mapping(src_ip, src_mac)
             self.rpc_manager.rpc_update_arp(src_ip, src_mac)
             self.zk_manager.log_arp_mapping(src_ip, src_mac)
-        self.zk_manager.delete_failover_log(ZkManager.ARP_LEARNING)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
             self._handle_arp_request(dpid, in_port, arp_header)
-        # Process ARP reply
-        elif arp_header.opcode == arp.ARP_REPLY:
-            self._handle_arp_reply(arp_header)
 
     def create_arp_packet(self, src_mac, dst_mac, dst_ip, src_ip, opcode):
         """Create an Ethernet packet, with ARP packet inside"""
@@ -119,6 +109,10 @@ class InceptionArp(object):
             dst_ip_reply = src_ip
             self.send_arp_reply(src_ip_reply, src_mac_reply,
                                 dst_ip_reply, vmac_reply)
+
+        else:
+            LOGGER.info("Query failure: MAC for (dst_ip=%s) cannot be found",
+                        dst_ip)
 
     def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
         """

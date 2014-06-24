@@ -16,8 +16,6 @@
 #    under the License.
 from oslo.config import cfg
 
-from ryu.app.inception_util import ZkManager
-
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
 CONF.import_opt('arp_timeout', 'ryu.app.inception_conf')
@@ -27,6 +25,7 @@ class InceptionRpc(object):
     """Inception Cloud rpc module for handling rpc calls"""
     def __init__(self, inception):
         self.inception = inception
+        self.dcenter_id = inception.dcenter_id
 
         # name shortcuts
         self.arp_manager = inception.arp_manager
@@ -63,68 +62,52 @@ class InceptionRpc(object):
         # Locally reconstruct switch vmac
         self.vmac_manager.create_swc_vmac(dcenter, dpid, switch_id)
 
-    def update_vm_id(self, mac, vm_id):
-        self.inception.vm_manager.update_vm_id(mac, vm_id)
-        (dcenter, dpid, port) = self.vm_manager.get_position(mac)
+    def update_vm_id(self, mac, dpid, vm_id):
+        self.inception.vm_manager.update_vm_id(mac, dpid, vm_id)
+        dcenter, dpid, port = self.vm_manager.get_position(mac)
         self.zk_manager.log_vm_id(dcenter, dpid, port, mac, vm_id)
         # Locally reconstruct vm vmac
         self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
                                          self.vm_manager)
 
-    def revoke_vm_id(self, mac, vm_id, dpid):
-        self.vm_manager.revoke_vm_id(mac, vm_id)
-        self.switch_manager.recollect_vm_id(vm_id, dpid)
-
     def del_tenant_filter(self, dpid, mac):
         self.inception.flow_manager.del_tenant_filter(dpid, mac)
 
-    def redirect_local_flow(self, dpid_old, mac, vmac_old, vmac_new):
-        """
-        Update a local flow, which was towards a used-to-own mac,
-        mac has been migrated to the datacenter who calls the rpc
-        """
-        # Failover logging
-        log_tuple = (dpid_old, mac, vmac_old, vmac_new)
-        self.zk_manager.create_failover_log(ZkManager.RPC_REDIRECT_FLOW,
-                                           log_tuple)
+    def handle_dc_migration(self, mac, dcenter_old, dpid_old, port_old,
+                            vm_id_old, dcenter_new, dpid_new, port_new,
+                            vm_id_new):
+        # Handle migration happening in another datacenter
+        func_name = self.handle_dc_migration.__name__
+        argument_tuple = (mac, dcenter_old, dpid_old, port_old, vm_id_old,
+                          dcenter_new, dpid_new, port_new, dpid_new)
+        self.zk_manager.add_rpc_log(func_name, argument_tuple)
 
-        # Redirect local flow
-        dpid_gws = self.topology.get_gateways()
-        for dpid_gw in dpid_gws:
-            fwd_port = self.topology.get_fwd_port(dpid_old, dpid_gw)
-            self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
-                                             fwd_port, False)
-        # Send gratuitous ARP to all local sending guests
-        # TODO(chen): Only within ARP entry timeout
-        for mac_query in self.vmac_manager.get_query_macs(vmac_old):
-            ip = self.arp_manager.get_ip(mac)
-            ip_query = self.arp_manager.get_ip(mac_query)
-            self.inception.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
-                                                        mac_query)
-        self.vmac_manager.del_vmac_query(vmac_old)
+        self.vm_manager.update_position(mac, dcenter_new, dpid_new, port_new)
+        self.vm_manager.revoke_vm_id(mac, dpid_old)
+        self.vm_manager.update_vm_id(mac, dpid_new, vm_id_new)
+        tenant_id = self.tenant_manager.get_tenant_id(mac)
+        vmac_old = self.vmac_manager.construct_vmac(dcenter_old, dpid_old,
+                                                  vm_id_old, tenant_id)
+        vmac_new = self.vmac_manager.construct_vmac(dcenter_new, dpid_new,
+                                                  vm_id_new, tenant_id)
+        # Handle live migration in dcenter_new
+        if dcenter_old == self.dcenter_id:
+            # The vm used to belong to this datacenter
+            self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
+            dpid_gws = self.topology.get_gateways()
+            for dpid_gw in dpid_gws:
+                fwd_port = self.topology.get_fwd_port(dpid_old, dpid_gw)
+                self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
+                                                 fwd_port, False)
+        else:
+            # The vm was never in this datacenter
+            dpid_gws = self.topology.get_gateways()
+            for dpid_gw in dpid_gws:
+                fwd_port = self.topology.get_dcenter_port(dpid_gw, dcenter_new)
+                self.flow_manager.set_local_flow(dpid_gw, vmac_old, vmac_new,
+                                                 fwd_port)
 
-        self.zk_manager.delete_failover_log(ZkManager.RPC_REDIRECT_FLOW)
-
-    def set_gateway_flow(self, mac, vmac_old, vmac_new, dcenter_new):
-        """Update gateway flow to rewrite an out-of-date vmac_old to vmac_new
-        and forward accordingly, and update old local ARP caches"""
-
-        # Failover logging
-        log_tuple = (mac, vmac_old, vmac_new, dcenter_new)
-        self.zk_manager.create_failover_log(ZkManager.RPC_GATEWAY_FLOW,
-                                           log_tuple)
-
-        dpid_gws = self.topology.get_gateways()
-        for dpid_gw in dpid_gws:
-            fwd_port = self.topology.get_dcenter_port(dpid_gw, dcenter_new)
-            self.flow_manager.set_local_flow(dpid_gw, vmac_old, vmac_new,
-                                             fwd_port)
-
-        # Send gratuitous arp to all guests that have done ARP requests to mac
-        for mac_query in self.vmac_manager.get_query_macs(vmac_old):
-            ip = self.arp_manager.get_ip(mac)
-            ip_query = self.arp_manager.get_ip(mac_query)
-            self.send_arp_reply(ip, vmac_new, ip_query, mac_query)
-        self.vmac_manager.del_vmac_query(vmac_old)
-
-        self.zk_manager.delete_failover_log(ZkManager.RPC_GATEWAY_FLOW)
+        self.inception.notify_vmac_update(mac, vmac_old, vmac_new)
+        self.zk_manager.move_vm(mac, dcenter_old, dpid_old, port_old,
+                                dcenter_new, dpid_new, port_new, vm_id_new)
+        self.zk_manager.del_rpc_log(func_name)

@@ -16,9 +16,6 @@
 #    under the License.
 
 """A global view of Inception configurations, to ease management"""
-
-import os
-
 from oslo.config import cfg
 
 from ryu.ofproto import ofproto_v1_2
@@ -38,12 +35,6 @@ CONF.register_opts([
     cfg.StrOpt('zk_election',
                default='/election',
                help='Path of leader election in ZooKeeper'),
-    cfg.StrOpt('zk_data',
-               default='/data',
-               help="Path for storing all network data"),
-    cfg.StrOpt('zk_failover',
-               default='/failover',
-               help="Path for storing failover logging"),
     cfg.StrOpt('zk_log_level',
                default='warning',
                help="Log level for Kazoo/ZooKeeper"),
