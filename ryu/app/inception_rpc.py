@@ -89,11 +89,11 @@ class InceptionRpc(object):
                                            log_tuple)
 
         # Redirect local flow
-        dpid_gw = self.topology.get_gateway()
-        fwd_port = self.topology.get_fwd_port(dpid_old, dpid_gw)
-
-        self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
-                                         fwd_port, False)
+        dpid_gws = self.topology.get_gateways()
+        for dpid_gw in dpid_gws:
+            fwd_port = self.topology.get_fwd_port(dpid_old, dpid_gw)
+            self.flow_manager.set_local_flow(dpid_old, vmac_old, vmac_new,
+                                             fwd_port, False)
         # Send gratuitous ARP to all local sending guests
         # TODO(chen): Only within ARP entry timeout
         for mac_query in self.vmac_manager.get_query_macs(vmac_old):
@@ -114,9 +114,11 @@ class InceptionRpc(object):
         self.zk_manager.create_failover_log(ZkManager.RPC_GATEWAY_FLOW,
                                            log_tuple)
 
-        dpid_gw = self.topology.get_gateway()
-        fwd_port = self.topology.get_dcenter_port(dcenter_new)
-        self.flow_manager.set_local_flow(dpid_gw, vmac_old, vmac_new, fwd_port)
+        dpid_gws = self.topology.get_gateways()
+        for dpid_gw in dpid_gws:
+            fwd_port = self.topology.get_dcenter_port(dpid_gw, dcenter_new)
+            self.flow_manager.set_local_flow(dpid_gw, vmac_old, vmac_new,
+                                             fwd_port)
 
         # Send gratuitous arp to all guests that have done ARP requests to mac
         for mac_query in self.vmac_manager.get_query_macs(vmac_old):
