@@ -1,8 +1,18 @@
-#!/bin/bash
+#!/usr/bin/env python
+
+from common import process_in_parallel
+
+import subprocess
+import threading
+import traceback
 
 SSHS='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
-for ip in `cat vm_ip.txt`; do 
-    $SSHS $ip 'kill `cat /tmp/do_test.pid`; rm /tmp/do_test.pid'; 
-    printf "stopping ping on %s: %d\n" $ip $?
-done
+cmds = []
+for line in open('vm_ip.txt'):
+    ip = line.strip()
+    cmd = SSHS + ' ' + ip + " 'kill `cat /tmp/do_test.pid`; rm /tmp/do_test.pid'"
+    print "stopping ping on %s" % ip
+    cmds.append(cmd)
+        
+process_in_parallel(cmds)

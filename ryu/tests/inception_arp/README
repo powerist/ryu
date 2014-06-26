@@ -3,6 +3,7 @@ Usage on scripts:
 compute_ip.txt: the list of IPs of all compute nodes.
 vm_ip.txt: the list of IPs of all VMs.
 util.sh: get_vm_ip(): generate above list. Used only when new VMs are changed.
+common.py: python utility modules, e.g. eval commonds parallelization
 network_tune.sh: set up mtu on br2 on each compute nodes, and setuid on arping on each vm.
 check_alive.sh: check whether target VMs are alive (ping-able).
 copy_to_vm: deploy test script to VMs, only used when new hosts are added or need to change the script.
@@ -24,6 +25,8 @@ make sure ssh connection is setup.
 1) start_ping.sh 
 
 .... wait for some time .....
+
+python cpu_memory.py <sdn_controller_process_id>
 
 2) stop_ping.sh
 
