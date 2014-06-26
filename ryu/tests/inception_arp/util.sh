@@ -4,7 +4,7 @@ SSHS='ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
 function get_vm_name {
     for i in `cat compute_ip.txt`; do
-        $SSHS $i 'sudo docker.io inspect `sudo docker.io  ps -q`' |grep Name |cut -f 2 -d '/' |cut -f 1 -d '"'
+        $SSHS ubuntu@$i 'sudo docker.io inspect `sudo docker.io  ps -q`' |grep Name |cut -f 2 -d '/' |cut -f 1 -d '"'
     done
 }
 
@@ -13,3 +13,5 @@ function get_vm_ip {
         echo "10.2.$i"
     done
 }
+
+get_vm_ip > vm_ip.txt

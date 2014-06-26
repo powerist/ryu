@@ -1,36 +1,17 @@
 #!/usr/bin/env python
 
-import subprocess
+from common import process_in_parallel
+
 import sys
-import threading
 import traceback
 
 SCPS='scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
 if len(sys.argv) < 2:
-    print "usage: collect_data <output_file> <tail_line=600> <head_line=300>"
+    print "usage: collect_data <output_file> <num_skips=30>"
     sys.exit()
 output_file = sys.argv[1]
-tail_line = sys.argv[2] if len(sys.argv) >= 3 else 600
-head_line = sys.argv[3] if len(sys.argv) >= 4 else 300
-
-def exec_cmd(cmd):
-    print(('-' * 15 + ' %s ') % cmd)
-    proc = subprocess.Popen(['/bin/bash', '-c', cmd])
-    proc.communicate()            
-
-def process_in_parallel(cmds):
-    try:
-        threads = []
-        # execute each command
-        for cmd in cmds:
-            thread = threading.Thread(target=exec_cmd, args=(cmd,))
-            thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join()
-    except Exception:
-        print(traceback.format_exc())
+num_skips = sys.argv[2] if len(sys.argv) >= 3 else 30
 
 ######################################################### retrieve data (in parallel: Map)
 cmds = []
@@ -41,14 +22,43 @@ for line in open('vm_ip.txt'):
 
 process_in_parallel(cmds)        
 
-######################################################### transform data (in parallel: Map)
-cmds = []
+######################################################### transform data (single-thread: Map)
 for line in open('vm_ip.txt'):
-    ip = line.strip()
-    cmd = """cat /tmp/ping.log.%s | grep -v skip |grep -A 1 ARPING  |grep -v ^-- |sed -e 's/ARPING //' |sed -e 's/^.*time=\(.*\)/\1/' |paste - - -d,|grep -v 10.2.99.0 | perl -ne 's/([0-9]+\.[0-9]+) (usec)/($2?$1\/1000:$1)." msec"/e; s/msec//; print "".$_' | tail -n +%s |head -%s > /tmp/ping.out.%s""" % (ip, tail_line, head_line, ip)
-    cmds.append(cmd)
-        
-process_in_parallel(cmds)        
+    ip = line.strip()    
+
+    print 'tranform file=/tmp/ping.log.%s' % ip
+    fin = open('/tmp/ping.log.%s' % ip)
+    fout = open('/tmp/ping.out.%s' % ip, 'w')
+    line_in = ''
+    line_out = []
+    num_line_out = 0
+    while True:
+        line_in = fin.readline().strip()
+        if not line_in:
+            break
+        if line_in.startswith('ARPING '):
+            line_out.append(line_in.replace('ARPING ', ''))
+        elif line_in.startswith('Unicast '):
+            line_out.append(line_in)
+        elif line_in.startswith('Sent '):
+            pass
+        elif line_in.startswith('Received 0 response'):
+            line_out.append('X X X X X Timeout')
+            num_line_out += 1
+            if num_line_out >= num_skips:
+                fout.write(','.join(line_out) + '\n')
+            line_out = []
+        elif line_in.startswith('Received 1 response'):
+            num_line_out += 1
+            if num_line_out >= num_skips:
+                fout.write(','.join(line_out) + '\n')
+            line_out = []
+        elif line_in == 'skip local ip':
+            pass
+        else:
+            raise RuntimeError('Unknown format of line=%s', line_in)
+    fin.close()
+    fout.close()
 
 ######################################################### combine data (single-thread: Reduce)
 def check_ip(ip1, ip2):
