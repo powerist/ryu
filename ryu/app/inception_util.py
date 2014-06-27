@@ -18,6 +18,7 @@
 """Inception utilities"""
 import os
 import time
+import struct
 
 from collections import defaultdict
 from collections import deque
@@ -35,6 +36,10 @@ from ryu.lib.dpid import str_to_dpid
 from ryu.app import inception_dhcp as i_dhcp
 from ryu.app import inception_priority as i_priority
 from ryu.lib import hub
+from ryu.lib.packet.packet import Packet
+from ryu.lib.packet.dhcp import dhcp
+from ryu.lib.packet import ethernet
+from ryu.lib.packet import udp
 from ryu.ofproto import ether
 from ryu.ofproto import inet
 
@@ -1006,6 +1011,30 @@ class ZkManager(object):
             data, _ = self.zk.get(log_path)
             data_tuple = str_to_tuple(data)
         return (znode, data_tuple)
+
+
+class InceptionPacket(Packet):
+    """Subclass of ryu Packet"""
+    def __init__(self, data=None, protocols=None, parse_cls=ethernet.ethernet):
+        Packet.__init__(data, protocols, parse_cls)
+
+    def _parser(self, cls):
+        rest_data = self.data
+        while cls:
+            try:
+                proto, cls, rest_data = cls.parser(rest_data)
+            except struct.error:
+                break
+            if proto:
+                self.protocols.append(proto)
+                if isinstance(proto, udp):
+                    if proto.src_port in (i_dhcp.CLIENT_PORT,
+                                          i_dhcp.SERVER_PORT):
+                        # DHCP packet
+                        cls = dhcp
+
+        if rest_data:
+            self.protocols.append(rest_data)
 
 
 def tuple_to_str(data_tuple, sep=','):
