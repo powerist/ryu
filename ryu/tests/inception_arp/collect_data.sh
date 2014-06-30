@@ -34,6 +34,7 @@ for line in open('vm_ip.txt'):
     num_line_out = 0
     while True:
         line_in = fin.readline().strip()
+        line_in  = line_in.replace('\x00', '') # remove possible \x00 non-sense chars
         if not line_in:
             break
         if line_in.startswith('ARPING '):
