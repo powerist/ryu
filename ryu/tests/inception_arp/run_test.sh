@@ -8,7 +8,7 @@ local_ip=`hostname -I`
 
 while : ; do
     interval=$(./calc_exp $1 $RANDOM)
-    /bin/sleep 5
+    /bin/sleep 2.5
     rand_id=`shuf -i 0-$((${#vm_ip_list[@]}-1)) -n 1`
     target_host=${vm_ip_list[$rand_id]}
     if [ $target_host == $local_ip ]; then
