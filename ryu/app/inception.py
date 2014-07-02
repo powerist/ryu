@@ -102,6 +102,7 @@ class Inception(app_manager.RyuApp):
         # RPC
         self.inception_rpc = i_rpc.InceptionRpc(self)
         self.rpc_manager._setup_rpc_server_clients(self.inception_rpc)
+        self.zk_manager.load_failover_logs()
 
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
@@ -122,8 +123,10 @@ class Inception(app_manager.RyuApp):
             switch_id = self.switch_manager.get_swc_id(self.dcenter_id, dpid)
             if switch_id is None:
                 switch_id = self.switch_manager.generate_swc_id(dpid)
-                self.rpc_manager.rpc_update_swcid(self.dcenter_id, dpid,
-                                                  switch_id)
+                rpc_func_name = self.inception_rpc.update_swc_id.__name__
+                rpc_args = (self.dcenter_id, dpid, switch_id)
+                self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
+
                 self.vmac_manager.create_swc_vmac(self.dcenter_id, dpid,
                                                   switch_id)
                 self.zk_manager.log_dpid_id(self.dcenter_id, dpid, switch_id)
@@ -152,12 +155,11 @@ class Inception(app_manager.RyuApp):
         """Check if any work is left by previous controller.
         If so, continue the unfinished work.
         """
-        (pktin_logs, rpc_logs) = self.zk_manager.get_failover_logs()
-        # Do unfinished packt_in handling
+        pktin_logs, rpc_logs = self.zk_manager.get_failover_logs()
+        # Do unfinished packet_in handling
         for pktin_log, raw_data in pktin_logs.items():
-            dpid, in_port_str = i_util.str_to_tuple(pktin_log)
-            in_port = int(in_port_str)
-            pkt_data = bytearray(raw_data, 'Latin-1')
+            dpid, in_port = i_util.str_to_tuple(pktin_log)
+            pkt_data = raw_data.decode('Latin-1').encode('Latin-1')
             packet = InceptionPacket(pkt_data)
             self._process_packet_in(dpid, in_port, packet)
             # Enqueue the log so that other controllers
@@ -167,12 +169,14 @@ class Inception(app_manager.RyuApp):
             self.zk_manager.del_packetin_log(pktin_log)
 
         # Do unfinished rpc
-        # TODO(chen): How to log rpc effectively?
         for rpc_log, rpc_data in rpc_logs.items():
+            func_name, _ = i_util.str_to_tuple(rpc_log)
             rpc_tuple = i_util.str_to_tuple(rpc_data)
             try:
-                rpc_method = getattr(self.inception_rpc, rpc_log)
-                rpc_method(*rpc_tuple)
+                txn = self.zk_manager.create_transaction()
+                rpc_method = getattr(self.inception_rpc, func_name)
+                rpc_method(txn, *rpc_tuple)
+                self.zk_manager.del_rpc_log(rpc_log, txn)
             except AttributeError:
                 LOGGER.warning("Unexpected exception in finding rpc method")
 
@@ -190,7 +194,7 @@ class Inception(app_manager.RyuApp):
                 # Logging in zookeeper
                 packet.serialize()
                 packet_data = packet.data.decode('Latin-1').encode('Latin-1')
-                pktin_log = i_util.tuple_to_str((dpid, str(in_port)))
+                pktin_log = i_util.tuple_to_str((dpid, in_port))
                 self.zk_manager.add_packetin_log(pktin_log, packet_data)
 
                 self._process_packet_in(dpid, in_port, packet)
@@ -207,11 +211,12 @@ class Inception(app_manager.RyuApp):
             # TODO(chen): slave controller consumes handled packets
             packet.serialize()
             packet_data = packet.data
-            log_data = i_util.tuple_to_str((dpid, str(in_port), packet_data))
+            log_data = i_util.tuple_to_str((dpid, in_port, packet_data))
             self.packet_queue.append(log_data)
 
     def _process_packet_in(self, dpid, in_port, packet):
         """Process raw data received from dpid through in_port."""
+        txn = self.zk_manager.create_transaction()
         # Process packet
         try:
             ether_header = packet.get_protocol(ethernet)
@@ -222,17 +227,17 @@ class Inception(app_manager.RyuApp):
                 if (self.dcenter_id, dpid, in_port) != pos_old:
                     dcenter_old, dpid_old, port_old = pos_old
                     self.handle_migration(ether_src, dcenter_old, dpid_old,
-                                          port_old, dpid, in_port)
+                                          port_old, dpid, in_port, txn)
             else:
-                self.learn_new_vm(dpid, in_port, ether_src)
+                self.learn_new_vm(dpid, in_port, ether_src, txn)
             # Handle ARP packet
             arp_header = packet.get_protocol(arp)
             if arp_header:
-                self.inception_arp.handle(dpid, in_port, arp_header)
+                self.inception_arp.handle(dpid, in_port, arp_header, txn)
             # handle DHCP packet if it is
             dhcp_header = packet.get_protocol(dhcp)
             if isinstance(dhcp_header, dhcp):
-                self.inception_dhcp.handle(dhcp_header, packet.raw_data)
+                self.inception_dhcp.handle(dhcp_header, packet.raw_data, txn)
 
         except Exception:
             LOGGER.warning("Unexpected exception in packet processing: %s",
@@ -242,7 +247,9 @@ class Inception(app_manager.RyuApp):
             LOGGER.warn("ether_header=%s", ether_header)
             LOGGER.warn("ether_src=%s", ether_src)
 
-    def learn_new_vm(self, dpid, port, mac):
+        self.zk_manager.txn_commit(txn)
+
+    def learn_new_vm(self, dpid, port, mac, txn):
         """Create vmac for new vm; Store vm position info;
         and install local forwarding flow"""
         # Update position
@@ -251,31 +258,26 @@ class Inception(app_manager.RyuApp):
                     mac, self.dcenter_id, dpid, port)
         pos = self.vm_manager.get_position(mac)
         if pos is None:
-            self.vm_manager.update_position(mac, self.dcenter_id, dpid, port)
-            self.rpc_manager.rpc_update_position(mac, self.dcenter_id, dpid,
-                                                 port)
-        # Create vm_id
-        vm_id = self.vm_manager.get_vm_id(mac)
-        if vm_id is None:
-            vm_id = self.vm_manager.generate_vm_id(mac, dpid,
-                                                   self.switch_manager)
-            self.rpc_manager.update_vmid(mac, dpid, vm_id)
+            # Create vm_id
+            vm_id = self.switch_manager.create_vm_id(dpid)
+            self.vm_manager.update_vm(self.dcenter_id, dpid, port, mac, vm_id)
+            rpc_func_name = self.inception_rpc.update_vm.__name__
+            rpc_args = (self.dcenter_id, dpid, port, mac, vm_id)
+            self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
             vmac = self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
                                                     self.vm_manager)
         # Set up local flow
         self.flow_manager.set_tenant_filter(dpid, vmac, mac)
         self.flow_manager.set_local_flow(dpid, vmac, mac, port)
         # Register position and vm_id
-        self.zk_manager.log_vm(self.dcenter_id, dpid, port, mac, vm_id)
+        self.zk_manager.log_vm(self.dcenter_id, dpid, port, mac, vm_id, txn)
 
     def handle_migration(self, mac, dcenter_old, dpid_old, port_old, dpid_new,
-                         port_new):
+                         port_new, txn):
         """Set flows to handle VM migration properly"""
         LOGGER.info("Handle VM migration")
         # Update VM position
         vmac_old = self.vmac_manager.get_vm_vmac(mac)
-        self.vm_manager.update_position(mac, self.dcenter_id, dpid_new,
-                                        port_new)
 
         # Multi-datacenter migration
         if dcenter_old != self.dcenter_id:
@@ -284,20 +286,21 @@ class Inception(app_manager.RyuApp):
 
             # A new vmac has not been created
             # Revoke old vm_id
-            vm_id_old = self.vm_manager.revoke_vm_id(mac, dpid_old)
+            vm_id_old = self.vm_manager.get_vm_id(mac)
             self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
             # Generate new vm_id
-            vm_id_new = self.vm_manager.generate_vm_id(mac, dpid_new,
-                                                       self.switch_manager)
+            vm_id_new = self.switch_manager.create_vm_id(dpid_new)
+            self.vm_manager.update_vm(self.dcenter_id, dpid_new, port_new, mac,
+                                      vm_id_new)
             vmac_new = self.vmac_manager.create_vm_vmac(mac,
                                                         self.tenant_manager,
                                                         self.vm_manager)
 
             # Instruct other datacenter to operate accordingly
-            self.rpc_manager.handle_dc_migration(mac, dcenter_old, dpid_old,
-                                                 port_old, vm_id_old,
-                                                 self.dcenter_id, dpid_new,
-                                                 port_new, vm_id_new)
+            rpc_func_name = self.inception_rpc.handle_dc_migration.__name__
+            rpc_args = (mac, dcenter_old, dpid_old, port_old, vm_id_old,
+                        self.dcenter_id, dpid_new, port_new, vm_id_new)
+            self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
 
             # Set up flows at gateway to redirect flows bound for
             # old vmac in dcenter_old to new vmac
@@ -318,20 +321,23 @@ class Inception(app_manager.RyuApp):
                 self.inception_arp.send_arp_reply(ip, vmac_new, ip_query,
                                                   mac_query)
             self.vmac_manager.del_vmac_query(vmac_old)
-            return
 
         # Same datacenter, different switch migration
-        if dpid_old != dpid_new:
+        elif dpid_old != dpid_new:
             LOGGER.info("VM migration from (DPID=%s) to (DPID=%s)",
                         dpid_old, dpid_new)
 
             # Install/Update a new flow at dpid_new towards mac
             # Revoke old vm_id
-            vm_id_old = self.vm_manager.revoke_vm_id(mac, dpid_old)
+            vm_id_old = self.vm_manager.get_vm_id(mac)
             self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
             # Generate new vm_id
-            vm_id_new = self.vm_manager.generate_vm_id(mac, dpid_new,
-                                                       self.switch_manager)
+            vm_id_new = self.switch_manager.create_vm_id(dpid_new)
+            self.vm_manager.update_vm(self.dcenter_id, dpid_new, port_new, mac,
+                                      vm_id_new)
+            rpc_func_name = self.inception_rpc.update_vm.__name__
+            rpc_args = (self.dcenter_id, dpid_new, port_new, mac, vm_id_new)
+            self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
             vmac_new = self.vmac_manager.create_vm_vmac(mac,
                                                         self.tenant_manager,
                                                         self.vm_manager)
@@ -352,10 +358,9 @@ class Inception(app_manager.RyuApp):
             LOGGER.info("Add local forward flow on (switch=%s) towards "
                         "(mac=%s)", dpid_new, mac)
             self.notify_vmac_update(mac, vmac_old, vmac_new)
-            return
 
         # Same switch, different port migration (reboot)
-        if port_old != port_new:
+        elif port_old != port_new:
             LOGGER.info("VM migration (reboot etc) from (dpid_old=%s)"
                         " to (dpid_new=%s)", dpid_old, dpid_new)
 
@@ -364,13 +369,10 @@ class Inception(app_manager.RyuApp):
                                              False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
-            return
 
-        # Impossible to reach here
-        raise RuntimeError("Unknow migration type: (mac=%s), (dcenter_old=%s),"
-                           " (dpid_old=%s), (port_old=%s), (dpid_new=%s),"
-                           " (port_new=%s", mac, dcenter_old, dpid_old,
-                           port_old, dpid_new, port_new)
+        self.zk_manager.move_vm(mac, dcenter_old, dpid_old, port_old,
+                                self.dcenter_id, dpid_new, port_new, vm_id_new,
+                                txn)
 
     def notify_vmac_update(self, mac, vmac_old, vmac_new):
         # Send gratuitous ARP to all local guests sending traffic to mac
