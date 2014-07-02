@@ -14,7 +14,13 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import logging
+
 from oslo.config import cfg
+
+from ryu.app import inception_util as i_util
+
+LOGGER = logging.getLogger(__name__)
 
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')
@@ -37,60 +43,47 @@ class InceptionRpc(object):
         self.switch_manager = inception.switch_manager
         self.zk_manager = inception.zk_manager
 
-    def update_arp_mapping(self, ip, mac):
+    def do_rpc(self, func_name, rpc_id, arguments):
+        LOGGER.info("RPC: %s", func_name)
+        znode = i_util.tuple_to_str((func_name, rpc_id))
+        self.zk_manager.add_rpc_log(znode, arguments)
+        txn = self.zk_manager.create_transaction()
+        func = getattr(self, func_name)
+        func(txn, *arguments)
+        self.zk_manager.del_rpc_log(znode, txn)
+
+    def update_arp_mapping(self, txn, ip, mac):
         """Update remote ip_mac mapping"""
         self.arp_manager.update_mapping(ip, mac)
-        self.zk_manager.log_arp_mapping(ip, mac)
+        self.zk_manager.log_arp_mapping(ip, mac, txn)
 
-    def send_arp_reply(self, src_ip, src_mac, dst_ip, dst_mac):
-        self.inception.inception_arp.send_arp_reply(src_ip, src_mac, dst_ip,
-                                                    dst_mac)
-
-    def update_position(self, mac, dcenter, dpid, port):
-        self.vm_manager.update_position(mac, dcenter, dpid, port)
-        self.zk_manager.log_vm_position(dcenter, dpid, port, mac)
-
-    def del_pos_in_zk(self, dcenter, dpid, port):
-        self.zk_manager.del_vm_position(dcenter, dpid, port)
-
-    def update_vmac(self, mac, vmac):
-        self.inception.vmac_manager.update_vm_vmac(mac, vmac)
-
-    def update_swc_id(self, dcenter, dpid, switch_id):
+    def update_swc_id(self, txn, dcenter, dpid, switch_id):
         self.inception.switch_manager.update_swc_id(dcenter, dpid, switch_id)
-        self.zk_manager.log_dpid_id(dcenter, dpid, switch_id)
+        self.zk_manager.log_dpid_id(dcenter, dpid, switch_id, txn)
         # Locally reconstruct switch vmac
         self.vmac_manager.create_swc_vmac(dcenter, dpid, switch_id)
 
-    def update_vm_id(self, mac, dpid, vm_id):
-        self.inception.vm_manager.update_vm_id(mac, dpid, vm_id)
-        dcenter, dpid, port = self.vm_manager.get_position(mac)
-        self.zk_manager.log_vm_id(dcenter, dpid, port, mac, vm_id)
-        # Locally reconstruct vm vmac
+    def update_vm(self, txn, dcenter, dpid, port, mac, vm_id):
+        self.vm_manager.update_vm(dcenter, dpid, port, mac, vm_id)
         self.vmac_manager.create_vm_vmac(mac, self.tenant_manager,
                                          self.vm_manager)
+        self.zk_manager.log_vm(dcenter, dpid, port, mac, vm_id, txn)
 
-    def del_tenant_filter(self, dpid, mac):
+    def del_tenant_filter(self, txn, dpid, mac):
         self.inception.flow_manager.del_tenant_filter(dpid, mac)
 
-    def handle_dc_migration(self, mac, dcenter_old, dpid_old, port_old,
+    def handle_dc_migration(self, txn, mac, dcenter_old, dpid_old, port_old,
                             vm_id_old, dcenter_new, dpid_new, port_new,
                             vm_id_new):
         # Handle migration happening in another datacenter
-        func_name = self.handle_dc_migration.__name__
-        argument_tuple = (mac, dcenter_old, dpid_old, port_old, vm_id_old,
-                          dcenter_new, dpid_new, port_new, dpid_new)
-        self.zk_manager.add_rpc_log(func_name, argument_tuple)
-
-        self.vm_manager.update_position(mac, dcenter_new, dpid_new, port_new)
-        self.vm_manager.revoke_vm_id(mac, dpid_old)
-        self.vm_manager.update_vm_id(mac, dpid_new, vm_id_new)
+        self.vm_manager.update_vm(dcenter_new, dpid_new, port_new, mac,
+                                  vm_id_new)
         tenant_id = self.tenant_manager.get_tenant_id(mac)
         vmac_old = self.vmac_manager.construct_vmac(dcenter_old, dpid_old,
                                                   vm_id_old, tenant_id)
         vmac_new = self.vmac_manager.construct_vmac(dcenter_new, dpid_new,
                                                   vm_id_new, tenant_id)
-        # Handle live migration in dcenter_new
+        # Handle live migration happening in dcenter_new
         if dcenter_old == self.dcenter_id:
             # The vm used to belong to this datacenter
             self.switch_manager.recollect_vm_id(vm_id_old, dpid_old)
@@ -109,5 +102,5 @@ class InceptionRpc(object):
 
         self.inception.notify_vmac_update(mac, vmac_old, vmac_new)
         self.zk_manager.move_vm(mac, dcenter_old, dpid_old, port_old,
-                                dcenter_new, dpid_new, port_new, vm_id_new)
-        self.zk_manager.del_rpc_log(func_name)
+                                dcenter_new, dpid_new, port_new, vm_id_new,
+                                txn)
