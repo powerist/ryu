@@ -26,6 +26,7 @@ from ryu.app import inception_rpc as i_rpc
 from ryu.app import inception_util as i_util
 from ryu.app.inception_util import Topology
 from ryu.app.inception_util import InceptionPacket
+from ryu.app.inception_util import RPCManager
 from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import handler
@@ -78,7 +79,9 @@ class Inception(app_manager.RyuApp):
         self.switch_manager = i_util.SwitchManager(self.dcenter_id)
         self.vm_manager = i_util.VmManager()
         self.queue_manager = i_util.QueueManager()
-        self.rpc_manager = i_util.RPCManager(self.dcenter_id)
+
+        self.rpc_manager = RPCManager.rpc_from_config(CONF.peer_dcenters,
+                                                      self.dcenter_id)
         self.zk_manager = i_util.ZkManager(CONF.zookeeper_storage)
         dcenters = self.rpc_manager.get_dcenters()
         self.zk_manager.init_dcenter(dcenters)
