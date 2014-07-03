@@ -788,7 +788,8 @@ class RPCManager(object):
         rpc_manager = cls(dcenter_to_info, self_dcenter)
         return rpc_manager
 
-    def parse_peer_dcenters(self, peer_dcenters, out_sep=';', in_sep=','):
+    @staticmethod
+    def parse_peer_dcenters(peer_dcenters, out_sep=';', in_sep=','):
         """Convert string to dictionary"""
 
         peer_dcs_dic = {}
