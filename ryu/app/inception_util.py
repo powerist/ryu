@@ -1122,6 +1122,10 @@ class InceptionPacket(Packet):
                 proto, cls, rest_data = cls.parser(rest_data)
             except struct.error:
                 break
+            if isinstance(proto, dhcp):
+                self.protocols.append(proto)
+                continue
+
             if proto:
                 self.protocols.append(proto)
                 if isinstance(proto, udp):
