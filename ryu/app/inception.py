@@ -216,9 +216,10 @@ class Inception(app_manager.RyuApp):
             ether_src = ether_header.src
             pos_old = self.vm_manager.get_position(ether_src)
             if pos_old:
-                dcenter_old, dpid_old, port_old = pos_old
-                self.handle_migration(ether_src, dcenter_old, dpid_old,
-                                      port_old, dpid, in_port)
+                if (self.dcenter_id, dpid, in_port) != pos_old:
+                    dcenter_old, dpid_old, port_old = pos_old
+                    self.handle_migration(ether_src, dcenter_old, dpid_old,
+                                          port_old, dpid, in_port)
             else:
                 self.learn_new_vm(dpid, in_port, ether_src)
             # Handle ARP packet
