@@ -372,7 +372,6 @@ class Inception(app_manager.RyuApp):
                            " (port_new=%s", mac, dcenter_old, dpid_old,
                            port_old, dpid_new, port_new)
 
-
     def notify_vmac_update(self, mac, vmac_old, vmac_new):
         # Send gratuitous ARP to all local guests sending traffic to mac
         for mac_query in self.vmac_manager.get_query_macs(vmac_old):
