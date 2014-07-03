@@ -274,8 +274,11 @@ class Inception(app_manager.RyuApp):
         self.vm_manager.update_position(mac, self.dcenter_id, dpid_new,
                                         port_new)
 
+        # Multi-datacenter migration
         if dcenter_old != self.dcenter_id:
-            # Multi-datacenter migration
+            LOGGER.info("VM migration from (DC=%s) to (DC=%s)", dcenter_old,
+                        self.dcenter_id)
+
             # A new vmac has not been created
             # Revoke old vm_id
             vm_id_old = self.vm_manager.revoke_vm_id(mac, dpid_old)
@@ -314,8 +317,11 @@ class Inception(app_manager.RyuApp):
             self.vmac_manager.del_vmac_query(vmac_old)
             return
 
+        # Same datacenter, different switch migration
         if dpid_old != dpid_new:
-            # Same datacenter, different switch migration
+            LOGGER.info("VM migration from (DPID=%s) to (DPID=%s)",
+                        dpid_old, dpid_new)
+
             # Install/Update a new flow at dpid_new towards mac
             # Revoke old vm_id
             vm_id_old = self.vm_manager.revoke_vm_id(mac, dpid_old)
@@ -345,14 +351,24 @@ class Inception(app_manager.RyuApp):
             self.notify_vmac_update(mac, vmac_old, vmac_new)
             return
 
+        # Same switch, different port migration (reboot)
         if port_old != port_new:
-            # Same switch, different port migration
+            LOGGER.info("VM migration (reboot etc) from (dpid_old=%s)"
+                        " to (dpid_new=%s)", dpid_old, dpid_new)
+
             # Redirect traffic
             self.flow_manager.set_local_flow(dpid_old, vmac_old, mac, port_new,
                                              False)
             LOGGER.info("Update forward flow on (switch=%s) towards (mac=%s)",
                         dpid_old, mac)
             return
+
+        # Impossible to reach here
+        raise RuntimeError("Unknow migration type: (mac=%s), (dcenter_old=%s),"
+                           " (dpid_old=%s), (port_old=%s), (dpid_new=%s),"
+                           " (port_new=%s", mac, dcenter_old, dpid_old,
+                           port_old, dpid_new, port_new)
+
 
     def notify_vmac_update(self, mac, vmac_old, vmac_new):
         # Send gratuitous ARP to all local guests sending traffic to mac
