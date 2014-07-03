@@ -776,11 +776,17 @@ class TenantManager(object):
 
 class RPCManager(object):
     """Manager RPC clients and Issue RPC calls"""
-    def __init__(self, self_dcenter='0'):
+    def __init__(self, dcenter_to_info, self_dcenter='0'):
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
         self.self_dcenter = self_dcenter
-        self.dcenter_to_info = self.parse_peer_dcenters(CONF.peer_dcenters)
+        self.dcenter_to_info = dcenter_to_info
         self.dcenter_to_rpc = {}
+
+    @classmethod
+    def rpc_from_config(cls, peer_dcenters, self_dcenter='0'):
+        dcenter_to_info = cls.parse_peer_dcenters(peer_dcenters)
+        rpc_manager = cls(dcenter_to_info, self_dcenter)
+        return rpc_manager
 
     def parse_peer_dcenters(self, peer_dcenters, out_sep=';', in_sep=','):
         """Convert string to dictionary"""
