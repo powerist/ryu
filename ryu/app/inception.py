@@ -231,7 +231,7 @@ class Inception(app_manager.RyuApp):
                 self.inception_arp.handle(dpid, in_port, arp_header)
             # handle DHCP packet if it is
             dhcp_header = packet.get_protocol(dhcp)
-            if dhcp_header:
+            if isinstance(dhcp_header, dhcp):
                 self.inception_dhcp.handle(dhcp_header, packet.raw_data)
 
         except Exception:

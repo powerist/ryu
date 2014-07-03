@@ -70,8 +70,7 @@ class InceptionDhcp(object):
                     ip_addr = dhcp_header.yiaddr
                     mac_addr = dhcp_header.chaddr
                     if not self.arp_manager.mapping_exist(ip_addr):
-                        self.arp_manager.learn_arp_mapping(ip_addr, mac_addr,
-                                                           self.rpc_manager)
+                        self.arp_manager.learn_arp_mapping(ip_addr, mac_addr)
                         self.rpc_manager.rpc_update_arp(ip_addr, mac_addr)
                         self.zk_manager.log_arp_mapping(ip_addr, mac_addr)
                 break
