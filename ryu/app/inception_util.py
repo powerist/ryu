@@ -16,20 +16,20 @@
 #    under the License.
 
 """Inception utilities"""
+
 import os
 import time
 import struct
-
 from collections import defaultdict
 from collections import deque
 import logging
+from SimpleXMLRPCServer import SimpleXMLRPCServer
+from xmlrpclib import ServerProxy
+import socket
 
 from kazoo import client
-
 from oslo.config import cfg
-from SimpleXMLRPCServer import SimpleXMLRPCServer
-import socket
-from xmlrpclib import ServerProxy
+import bidict
 
 from ryu import log
 from ryu.lib.dpid import str_to_dpid
@@ -60,13 +60,8 @@ class Topology(object):
     Build switch level topology of Inception network.
     Gateway is assumed to have no local VMs connected.
     Topology is maintained as two dictionaries:
-
-    dpid_to_dpid: {dpid1 -> {dpid2 -> port}}
-    gateway_to_dcenters: {gateway_dpid -> {dcenter -> port}}
     """
     def __init__(self, gateway_ips=()):
-        # Connection between local pairs of switches
-        self.dpid_to_dpid = defaultdict(dict)
         # {dpid_gw -> {dcenter_id -> port_no}}
         self.gateway_to_dcenters = defaultdict(dict)
         self.gateway_ips = gateway_ips
@@ -76,7 +71,7 @@ class Topology(object):
         # {local dpid -> {remote ip -> local port}}
         self.dpid_ip_to_port = defaultdict(dict)
         # {local ip -> local dpid}
-        self.ip_to_dpid = {}
+        self.ip_to_dpid = bidict.bidict()
 
     @classmethod
     def topology_from_gateways(cls, gateway_ips_str):
@@ -111,17 +106,7 @@ class Topology(object):
                 peer_ip = self.extract_ip_addr(CONF.ip_prefix, port.name)
                 LOGGER.info("Add: (switch=%s, peer_ip=%s) -> (port=%s)",
                             dpid, peer_ip, port_no)
-                if peer_ip in self.ip_to_dpid:
-                    # peer_ip has been connected to the controller
-                    peer_dpid = self.ip_to_dpid[peer_ip]
-                    self.dpid_to_dpid[dpid][peer_dpid] = port_no
-
-                    peer_port = self.dpid_ip_to_port[peer_dpid][ip]
-                    self.dpid_to_dpid[peer_dpid][dpid] = peer_port
-
-                else:
-                    # Store the port_no until peer_ip is connected
-                    self.dpid_ip_to_port[dpid][peer_ip] = port_no
+                self.dpid_ip_to_port[dpid][peer_ip] = port_no
 
             # Port_name: e.g., "gateway_<dcenter_id>"
             elif port.name.startswith(remote_port_prefix):
@@ -169,13 +154,26 @@ class Topology(object):
         return dpid == self.dhcp_switch
 
     def get_fwd_port(self, dpid1, dpid2):
-        return self.dpid_to_dpid[dpid1][dpid2]
+        ip_2 = self.ip_to_dpid[:dpid2]  # bidict reverse query
+        port = self.dpid_ip_to_port[dpid1][ip_2]
+        return port
 
     def get_dcenter_port(self, dpid_gw, dcenter):
         return self.gateway_to_dcenters[dpid_gw][dcenter]
 
     def get_neighbors(self, dpid):
-        return self.dpid_to_dpid[dpid]
+        """Get neighbors in the form of {dpid_1: port_1, dpid_2, port_2, ...}.
+        Skip neighbor switches not connected yet (i.e., not in self.ip_to_dpid)
+        """
+
+        ip_to_port = self.dpid_ip_to_port[dpid]
+        dpid_to_port = {}
+        for ip, port in ip_to_port.items():
+            dpid = self.ip_to_dpid.get(ip)
+            if dpid is not None:
+                dpid_to_port[dpid] = port
+
+        return dpid_to_port
 
 
 class SwitchManager(object):
