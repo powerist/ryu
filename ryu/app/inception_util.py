@@ -111,7 +111,6 @@ class Topology(object):
             # Port_name: e.g., "gateway_<dcenter_id>"
             elif port.name.startswith(remote_port_prefix):
                 peer_dcenter = self.extract_dcenter(port.name)
-                port_no = port.port_no
                 self.gateway_to_dcenters[dpid][peer_dcenter] = port_no
                 LOGGER.info("New inter-datacenter connection:"
                             "(gateway=%s) -> (datacenter=%s)",
@@ -119,7 +118,7 @@ class Topology(object):
 
             # Port name matches DHCP port
             if port.name == CONF.dhcp_port:
-                self.dhcp_port = port.port_no
+                self.dhcp_port = port_no
 
     def extract_ip_addr(self, ip_prefix, port_name):
         """Extract IP address from port name"""
@@ -198,28 +197,28 @@ class SwitchManager(object):
     def create_vm_id(self, dpid):
         try:
             vm_id = self.dpid_to_vmids[dpid].pop()
-            return vm_id
+            return str(vm_id)
         except IndexError:
             LOGGER.info("ERROR: Index Error")
             return None
 
     def recollect_vm_id(self, vm_id, dpid):
-        self.dpid_to_vmids[dpid].appendleft(vm_id)
+        self.dpid_to_vmids[dpid].appendleft(int(vm_id))
 
     def generate_swc_id(self, dpid):
         """Create switch id"""
-        switch_id = (hash(dpid) % self.SWITCH_MAXID) + 1
+        swc_id = str((hash(dpid) % self.SWITCH_MAXID) + 1)
         local_ids = self.dcenter_to_swcids[self.self_dcenter]
-        if switch_id in local_ids.values():
+        if swc_id in local_ids.values():
             # TODO(chen): Hash conflict
-            LOGGER.info("ERROR: switch id conflict: %s", switch_id)
+            LOGGER.info("ERROR: switch id conflict: %s", swc_id)
         else:
-            local_ids[dpid] = switch_id
+            local_ids[dpid] = swc_id
 
-        return switch_id
+        return swc_id
 
-    def update_swc_id(self, dcenter, dpid, switch_id):
-        self.dcenter_to_swcids[dcenter][dpid] = switch_id
+    def update_swc_id(self, dcenter, dpid, swc_id):
+        self.dcenter_to_swcids[dcenter][dpid] = swc_id
 
     def get_swc_id(self, dcenter, dpid):
         return self.dcenter_to_swcids[dcenter].get(dpid)
@@ -230,7 +229,7 @@ class SwitchManager(object):
             return False
 
         try:
-            self.dpid_to_vmids[dpid].remove(vm_id)
+            self.dpid_to_vmids[dpid].remove(int(vm_id))
             return True
         except ValueError:
             return False
@@ -251,32 +250,10 @@ class VmManager(object):
         # Record VM's local flow setup, to prevent redundant flow setup
         self.mac_to_dpid = {}
 
-    def update_position(self, mac, dcenter, dpid, port):
-        """Update guest MAC and its connected switch"""
-        pos_tuple = (dcenter, dpid, port)
-        self.mac_to_position[mac] = pos_tuple
-
+    def update_vm(self, dcenter, dpid, port, mac, vm_id):
+        self.mac_to_position[mac] = (dcenter, dpid, port)
         LOGGER.info("Update: (mac=%s) => (dcenter=%s, switch=%s, port=%s)",
                     mac, dcenter, dpid, port)
-
-    def generate_vm_id(self, mac, dpid, switch_manager):
-        """Generate a new vm_id, 00 is saved for switch"""
-        vm_id = switch_manager.create_vm_id(dpid)
-        self.mac_to_id[mac] = (dpid, vm_id)
-
-        return vm_id
-
-    def revoke_vm_id(self, mac, dpid):
-        try:
-            dpid_record, vm_id = self.mac_to_id.pop(mac)
-            if dpid_record != dpid:
-                return None
-            else:
-                return vm_id
-        except KeyError:
-            LOGGER.info("KeyError: self.mac_to_id")
-
-    def update_vm_id(self, mac, dpid, vm_id):
         self.mac_to_id[mac] = (dpid, vm_id)
 
     def get_position(self, mac):
@@ -339,7 +316,7 @@ class VmacManager(object):
         for mac_query in self.vmac_to_queries[vmac].keys():
             time_now = time.time()
             query_time = self.vmac_to_queries[vmac][mac_query]
-            if (time_now - query_time) > CONF.arp_timeout:
+            if (time_now - float(query_time)) > CONF.arp_timeout:
                 del self.vmac_to_queries[vmac][mac_query]
             else:
                 query_list.append(mac_query)
@@ -368,7 +345,7 @@ class VmacManager(object):
         dcenter_vmac = "%02x:%02x:00:00:00:00" % (dcenter_high, dcenter_low)
         return dcenter_vmac
 
-    def create_swc_vmac(self, dcenter, dpid, switch_id):
+    def create_swc_vmac(self, dcenter, dpid, swc_id_str):
         """Generate MAC address prefix for switch based on
         datacenter id and switch id.
 
@@ -379,8 +356,9 @@ class VmacManager(object):
         dcenter_vmac = self.create_dc_vmac(dcenter)
         dcenter_prefix = self.get_dc_prefix(dcenter_vmac)
 
-        switch_high = (switch_id >> 8) & 0xff
-        switch_low = switch_id & 0xff
+        swc_id = int(swc_id_str)
+        switch_high = (swc_id >> 8) & 0xff
+        switch_low = swc_id & 0xff
         switch_suffix = ("%02x:%02x:00:00" % (switch_high, switch_low))
         switch_vmac = ':'.join((dcenter_prefix, switch_suffix))
         self.dpid_to_vmac[dpid] = switch_vmac
@@ -391,11 +369,11 @@ class VmacManager(object):
         _, dpid, _ = vm_manager.get_position(mac)
         switch_vmac = self.dpid_to_vmac[dpid]
         switch_prefix = self.get_swc_prefix(switch_vmac)
-        vm_id = vm_manager.get_vm_id(mac)
+        vm_id = int(vm_manager.get_vm_id(mac))
         vm_id_hex = vm_id & 0xff
         vm_id_suffix = "%02x" % vm_id_hex
 
-        tenant_id = tenant_manager.get_tenant_id(mac)
+        tenant_id = int(tenant_manager.get_tenant_id(mac))
         tenant_id_hex = tenant_id & 0xff
         tenant_id_suffix = "%02x" % tenant_id_hex
         vmac = ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
@@ -403,11 +381,13 @@ class VmacManager(object):
         LOGGER.info("Create: (mac=%s) => (vmac=%s)", mac, vmac)
         return vmac
 
-    def construct_vmac(self, dcenter, dpid, vm_id, tenant_id):
+    def construct_vmac(self, dcenter, dpid, vm_id_str, tenant_id_str):
         swc_vmac = self.dpid_to_vmac[dpid]
         switch_prefix = self.get_swc_prefix(swc_vmac)
+        vm_id = int(vm_id_str)
         vm_id_hex = vm_id & 0xff
         vm_id_suffix = "%02x" % vm_id_hex
+        tenant_id = int(tenant_id_str)
         tenant_id_hex = tenant_id & 0xff
         tenant_id_suffix = "%02x" % tenant_id_hex
         vmac = ':'.join((switch_prefix, vm_id_suffix, tenant_id_suffix))
@@ -733,7 +713,7 @@ class FlowManager(object):
 
 class TenantManager(object):
     """Manage tenant information"""
-    DEFAULT_TENANT_ID = 1
+    DEFAULT_TENANT_ID = "1"
 
     def __init__(self, mac_to_tenant={}):
         self.mac_to_tenant = mac_to_tenant
@@ -746,7 +726,7 @@ class TenantManager(object):
         if tenant_list:
             for tenant_id, mac_tuple in enumerate(tenant_list, 1):
                 for mac in mac_tuple:
-                    mac_to_tenant[mac] = tenant_id
+                    mac_to_tenant[mac] = str(tenant_id)
         tenant_manager = cls(mac_to_tenant)
         return tenant_manager
 
@@ -774,11 +754,15 @@ class TenantManager(object):
 
 class RPCManager(object):
     """Manager RPC clients and Issue RPC calls"""
+
+    MAX_ID = 65536
+
     def __init__(self, dcenter_to_info, self_dcenter='0'):
         # {peer_dc => peer_gateway}: Record neighbor datacenter connection info
         self.self_dcenter = self_dcenter
         self.dcenter_to_info = dcenter_to_info
         self.dcenter_to_rpc = {}
+        self.rpc_id = 0
 
     @classmethod
     def rpc_from_config(cls, peer_dcenters, self_dcenter='0'):
@@ -824,44 +808,11 @@ class RPCManager(object):
         peer_dcenters.append(self.self_dcenter)
         return peer_dcenters
 
-    def handle_dc_migration(self, mac, dcenter_old, dpid_old, port_old,
-                            vm_id_old, dcenter_new, dpid_new, port_new,
-                            vm_id_new):
+    def do_rpc(self, func_name, arguments):
+        rpc_id = str(self.rpc_id)
+        self.rpc_id = (self.rpc_id + 1) % self.MAX_ID
         for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.handle_dc_migration(mac, dcenter_old, dpid_old,
-                                           port_old, vm_id_old, dcenter_new,
-                                           dpid_new, port_new, vm_id_new)
-
-    def get_rpc_client(self, dcenter):
-        return self.dcenter_to_rpc.get(dcenter)
-
-    def rpc_update_position(self, mac, dcenter_id, dpid, port):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.update_position(mac, dcenter_id, dpid, port)
-
-    def rpc_update_vmac(self, mac, vmac):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.update_vmac(mac, vmac)
-
-    def rpc_update_arp(self, ip, mac):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.update_arp_mapping(ip, mac)
-
-    def rpc_update_swcid(self, dcenter, dpid, switch_id):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.update_swc_id(dcenter, dpid, switch_id)
-
-    def update_vmid(self, mac, dpid, vm_id):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.update_vm_id(mac, dpid, vm_id)
-
-    def rpc_revoke_vmid(self, mac, dpid):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.revoke_vm_id(mac, dpid)
-
-    def rpc_del_pos_in_zk(self, dcenter, dpid, port):
-        for rpc_client in self.dcenter_to_rpc.values():
-            rpc_client.del_pos_in_zk(dcenter, dpid, port)
+            rpc_client.do_rpc(func_name, rpc_id, arguments)
 
 
 class ArpManager(object):
@@ -926,6 +877,9 @@ class ZkManager(object):
             self.pktin_path = "/log/packet_in"
             self.rpc_path = "/log/rpc"
 
+            self.pktin_logs = {}
+            self.rpc_logs = {}
+
             zk_logger = logging.getLogger('kazoo')
             zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
             zk_logger.setLevel(zk_log_level)
@@ -964,19 +918,18 @@ class ZkManager(object):
                 dpid = dpid_unicode.encode('Latin-1')
                 dpid_path = os.path.join(dc_path, dpid)
                 id_str, _ = self.zk.get(dpid_path)
-                switch_manager.update_swc_id(dcenter, dpid, int(id_str))
-                vmac_manager.create_swc_vmac(dcenter, dpid, int(id_str))
+                switch_manager.update_swc_id(dcenter, dpid, id_str)
+                vmac_manager.create_swc_vmac(dcenter, dpid, id_str)
                 for port_unicode in self.zk.get_children(dpid_path):
                     port_str = port_unicode.encode('Latin-1')
                     port_path = os.path.join(dpid_path, port_str)
                     for mac_unicode in self.zk.get_children(port_path):
                         mac = mac_unicode.encode('Latin-1')
                         mac_path = os.path.join(port_path, mac)
-                        mac_id_str, _ = self.zk.get(mac_path)
-                        switch_manager.invalidate_vm_id(dpid, int(mac_id_str))
-                        vm_manager.update_position(mac, dcenter, dpid,
-                                                   int(port_str))
-                        vm_manager.update_vm_id(mac, int(mac_id_str))
+                        mac_id, _ = self.zk.get(mac_path)
+                        switch_manager.invalidate_vm_id(dpid, mac_id)
+                        vm_manager.update_vm(dcenter, dpid, port_str, mac,
+                                             mac_id)
                         vm_vmac = vmac_manager.create_vm_vmac(mac,
                                                               tenant_manager,
                                                               vm_manager)
@@ -993,86 +946,96 @@ class ZkManager(object):
                 zk_path = os.path.join(self.pos_path, dcenter)
                 self.zk.ensure_path(zk_path)
 
-    def log_dpid_id(self, dcenter, dpid, swc_id):
+    def log_dpid_id(self, dcenter, dpid, swc_id, txn=None):
         if self.zk_storage:
             zk_path = os.path.join(self.pos_path, dcenter, dpid)
-            self.zk.create(zk_path, str(swc_id), makepath=True)
+            if txn is None:
+                self.zk.create(zk_path, swc_id)
+            else:
+                txn.create(zk_path, swc_id)
 
-    def log_vm_id(self, dcenter, dpid, port, mac, vm_id):
+    def log_vm(self, dcenter, dpid, port, mac, vm_id, txn=None):
         if self.zk_storage:
-            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port),
-                                   mac)
-            self.zk.set(zk_path, str(vm_id))
+            zk_port_path = os.path.join(self.pos_path, dcenter, dpid, port)
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, port, mac)
+            if txn is None:
+                self.zk.create(zk_path, vm_id, makepath=True)
+            else:
+                txn.create(zk_port_path)
+                txn.create(zk_path, vm_id)
 
-    def log_vm_position(self, dcenter, dpid, port, mac):
-        if self.zk_storage:
-            zk_port_path = os.path.join(self.pos_path, dcenter, dpid,
-                                        str(port))
-            self.zk.ensure_path(zk_port_path)
-            zk_mac_path = os.path.join(zk_port_path, mac)
-            self.zk.create(zk_mac_path, makepath=True)
-
-    def log_vm(self, dcenter, dpid, port, mac, vm_id):
-        if self.zk_storage:
-            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port),
-                                   mac)
-            self.zk.create(zk_path, str(vm_id))
-
-    def del_vm(self, dcenter, dpid, port):
+    def del_vm(self, dcenter, dpid, port, txn=None):
         # Delete the port znode, along with the mac being its sub-node
         if self.zk_storage:
-            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port))
-            self.zk.delete(zk_path, recursive=True)
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, port)
+            if txn is None:
+                self.zk.delete(zk_path, recursive=True)
+            else:
+                txn.delete(zk_path)
 
     def move_vm(self, mac, dcenter_old, dpid_old, port_old, dcenter_new,
-                dpid_new, port_new, vm_id_new):
+                dpid_new, port_new, vm_id_new, txn):
         # Move a znode of MAC from one position to another
         if self.zk_storage:
-            txn = self.zk.transaction()
             zk_path_old = os.path.join(self.pos_path, dcenter_old, dpid_old,
-                                   str(port_old), mac)
+                                       port_old)
+            zk_mac_old = os.path.join(self.pos_path, dcenter_old, dpid_old,
+                                       port_old, mac)
+            for query_mac_unicode in self.zk.get_children(zk_mac_old):
+                query_mac = query_mac_unicode.encode('Latin-1')
+                zk_query_old = os.path.join(zk_mac_old, query_mac)
+                txn.delete(zk_query_old)
+            txn.delete(zk_mac_old)
             txn.delete(zk_path_old)
-            zk_path_new = os.path.join(self.pos_path, dcenter_new, dpid_new,
-                                       str(port_new), mac)
-            txn.create(zk_path_new, vm_id_new)
-            txn.commit()
+            zk_mac_new = os.path.join(self.pos_path, dcenter_new, dpid_new,
+                                       port_new, mac)
+            zk_port_new = os.path.join(self.pos_path, dcenter_new, dpid_new,
+                                       port_new)
+            txn.create(zk_port_new)
+            txn.create(zk_mac_new, vm_id_new)
 
-    def log_arp_mapping(self, ip, mac):
+    def log_arp_mapping(self, ip, mac, txn=None):
         if self.zk_storage:
             zk_path = os.path.join(self.arp_path, ip)
-            self.zk.create(zk_path, mac, makepath=True)
+            if txn is None:
+                self.zk.create(zk_path, mac)
+            else:
+                txn.create(zk_path, mac)
 
-    def log_query_mac(self, dcenter, dpid, port, mac, query_mac, query_time):
+    def log_query_mac(self, dcenter, dpid, port, mac, query_mac, query_time,
+                      txn=None):
         if self.zk_storage:
-            zk_path = os.path.join(self.pos_path, dcenter, dpid, str(port),
-                                   mac, query_mac)
-            self.zk.ensure_path(zk_path)
-            self.zk.set(zk_path, str(query_time))
+            zk_path = os.path.join(self.pos_path, dcenter, dpid, port, mac,
+                                   query_mac)
+            if txn is None:
+                self.zk.create(zk_path, query_time)
+            else:
+                txn.create(zk_path, query_time)
 
     def create_transaction(self):
-        return self.zk.transaction()
+        if self.zk_storage:
+            return self.zk.transaction()
+        else:
+            return None
 
-    def txn_add_log(self, txn, log_type, log_data):
-        zk_path = os.path.join(self.log_path, self.PACKET_NODE, log_type)
-        txn.create(zk_path, log_data)
+    def txn_commit(self, txn=None):
+        if txn is not None:
+            txn.commit()
 
-    def txn_commit(self, txn):
-        txn.commit()
-
-    def txn_del_log(self, txn, log_type, log_data):
-        txn.delete(self.log_path, self.PACKET_NODE, log_type)
-
-    def add_packetin_log(self, position, packet_data):
+    def add_packetin_log(self, position, packet_data, txn=None):
         """Failover logging"""
         if self.zk_storage:
             log_path = os.path.join(self.pktin_path, position)
             self.zk.create(log_path, packet_data)
 
-    def del_packetin_log(self, position):
+    def del_packetin_log(self, position, txn=None):
         """Delete failover logging"""
         if self.zk_storage:
             log_path = os.path.join(self.pktin_path, position)
-            self.zk.delete(log_path)
+            if txn is None:
+                self.zk.delete(log_path)
+            else:
+                txn.delete(log_path)
 
     def add_rpc_log(self, func_name, arguments_tuple):
         if self.zk_storage:
@@ -1080,31 +1043,34 @@ class ZkManager(object):
             arguments = tuple_to_str(arguments_tuple)
             self.zk.create(log_path, arguments)
 
-    def del_rpc_log(self, func_name):
+    def del_rpc_log(self, func_name, txn=None):
         if self.zk_storage:
             log_path = os.path.join(self.rpc_path, func_name)
-            self.zk.delete(log_path)
+            if txn is None:
+                self.zk.delete(log_path)
+            else:
+                txn.delete(log_path)
+                self.txn_commit(txn)
 
-    def get_failover_logs(self):
+    def load_failover_logs(self):
         # Get packet_in logs
-        pktin_logs = {}
         zk_pktins = self.zk.get_children(self.pktin_path)
         for znode_unicode in zk_pktins:
             znode = znode_unicode.encode('Latin-1')
             log_path = os.path.join(self.pktin_path, znode)
             data, _ = self.zk.get(log_path)
-            pktin_logs[znode] = data
+            self.pktin_logs[znode] = data
 
         # Get RPC logs
-        rpc_logs = {}
         zk_rpcs = self.zk.get_children(self.rpc_path)
         for znode_unicode in zk_rpcs:
             znode = znode_unicode.encode('Latin-1')
             log_path = os.path.join(self.rpc_path, znode)
             data, _ = self.zk.get(log_path)
-            rpc_logs[znode] = data
+            self.rpc_logs[znode] = data
 
-        return (pktin_logs, rpc_logs)
+    def get_failover_logs(self):
+        return (self.pktin_logs, self.rpc_logs)
 
 
 class InceptionPacket(Packet):

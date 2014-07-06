@@ -46,7 +46,7 @@ class InceptionArp(object):
         self.zk_manager = inception.zk_manager
         self.rpc_manager = inception.rpc_manager
 
-    def handle(self, dpid, in_port, arp_header):
+    def handle(self, dpid, in_port, arp_header, txn):
         LOGGER.info("Handle ARP packet")
         src_ip = arp_header.src_ip
         src_mac = arp_header.src_mac
@@ -54,11 +54,14 @@ class InceptionArp(object):
         # Do {IP => MAC} learning
         if not self.arp_manager.mapping_exist(src_ip):
             self.arp_manager.learn_arp_mapping(src_ip, src_mac)
-            self.rpc_manager.rpc_update_arp(src_ip, src_mac)
-            self.zk_manager.log_arp_mapping(src_ip, src_mac)
+            icp_rpc = self.inception.inception_rpc
+            rpc_func_name = icp_rpc.update_arp_mapping.__name__
+            rpc_args = (src_ip, src_mac)
+            self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
+            self.zk_manager.log_arp_mapping(src_ip, src_mac, txn)
         # Process ARP request
         if arp_header.opcode == arp.ARP_REQUEST:
-            self._handle_arp_request(dpid, in_port, arp_header)
+            self._handle_arp_request(dpid, in_port, arp_header, txn)
 
     def create_arp_packet(self, src_mac, dst_mac, dst_ip, src_ip, opcode):
         """Create an Ethernet packet, with ARP packet inside"""
@@ -78,7 +81,7 @@ class InceptionArp(object):
 
         return packet_out
 
-    def _handle_arp_request(self, dpid, in_port, arp_header):
+    def _handle_arp_request(self, dpid, in_port, arp_header, txn):
         """Process ARP request packet."""
 
         src_ip = arp_header.src_ip
@@ -97,10 +100,10 @@ class InceptionArp(object):
                         dst_ip, dst_mac, dst_vmac)
 
             # Record the communicating guests and time
-            query_time = time.time()
+            query_time = str(time.time())
             self.vmac_manager.update_query(dst_vmac, src_mac, query_time)
             self.zk_manager.log_query_mac(dst_dcenter, dst_dpid, dst_port,
-                                          dst_mac, src_mac, query_time)
+                                          dst_mac, src_mac, query_time, txn)
 
             # Send arp reply
             src_mac_reply = dst_vmac

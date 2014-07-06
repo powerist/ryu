@@ -39,6 +39,7 @@ class InceptionDhcp(object):
         self.switch_port = None
 
         # name shortcuts
+        self.inception = inception
         self.dpset = inception.dpset
         self.dcenter_id = inception.dcenter_id
         self.arp_manager = inception.arp_manager
@@ -54,7 +55,7 @@ class InceptionDhcp(object):
         self.switch_port = port
         LOGGER.info("DHCP server: (dpid=%s), (port=%s)", dpid, port)
 
-    def handle(self, dhcp_header, raw_data):
+    def handle(self, dhcp_header, raw_data, txn):
         # Process DHCP packet
         LOGGER.info("Handle DHCP packet")
 
@@ -71,8 +72,11 @@ class InceptionDhcp(object):
                     mac_addr = dhcp_header.chaddr
                     if not self.arp_manager.mapping_exist(ip_addr):
                         self.arp_manager.learn_arp_mapping(ip_addr, mac_addr)
-                        self.rpc_manager.rpc_update_arp(ip_addr, mac_addr)
-                        self.zk_manager.log_arp_mapping(ip_addr, mac_addr)
+                        icp_rpc = self.inception.inception_rpc
+                        rpc_func_name = icp_rpc.update_arp_mapping.__name__
+                        rpc_args = (ip_addr, mac_addr)
+                        self.rpc_manager.do_rpc(rpc_func_name, rpc_args)
+                        self.zk_manager.log_arp_mapping(ip_addr, mac_addr, txn)
                 break
 
         # A packet received from client. Find out the switch connected
