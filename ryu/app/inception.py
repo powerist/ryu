@@ -16,6 +16,7 @@
 #    under the License.
 
 import logging
+import md5
 
 from oslo.config import cfg
 import traceback
@@ -31,6 +32,7 @@ from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import handler
 from ryu.controller import ofp_event
+from ryu.lib import hub
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet.arp import arp
 from ryu.lib.packet.dhcp import dhcp
@@ -78,22 +80,11 @@ class Inception(app_manager.RyuApp):
         self.arp_manager = i_util.ArpManager()
         self.switch_manager = i_util.SwitchManager(self.dcenter_id)
         self.vm_manager = i_util.VmManager()
-        self.queue_manager = i_util.QueueManager()
 
         self.rpc_manager = RPCManager.rpc_from_config(CONF.peer_dcenters,
                                                       self.dcenter_id)
-        self.zk_manager = i_util.ZkManager(CONF.zookeeper_storage)
-        dcenters = self.rpc_manager.get_dcenters()
-        self.zk_manager.init_dcenter(dcenters)
-        self.zk_manager.load_data(arp_manager=self.arp_manager,
-                                  switch_manager=self.switch_manager,
-                                  vm_manager=self.vm_manager,
-                                  vmac_manager=self.vmac_manager,
-                                  tenant_manager=self.tenant_manager)
-        # Flag indicating if self is master controller
-        self.master_ctl = True
-        self.packet_queue = []
-        self.switch_count = 0
+        self.zk_manager = i_util.ZkManager(self, CONF.zookeeper_storage)
+
         ## Inception relevent modules
         # ARP
         self.inception_arp = i_arp.InceptionArp(self)
@@ -102,24 +93,30 @@ class Inception(app_manager.RyuApp):
         # RPC
         self.inception_rpc = i_rpc.InceptionRpc(self)
         self.rpc_manager._setup_rpc_server_clients(self.inception_rpc)
-        self.zk_manager.load_failover_logs()
 
     @handler.set_ev_cls(dpset.EventDP, dpset.DPSET_EV_DISPATCHER)
     def switch_connection_handler(self, event):
         """Handle when a switch event is received."""
-
         datapath = event.dp
         dpid = dpid_to_str(datapath.id)
 
         # A new switch connects
         if event.enter:
             LOGGER.info("New switch connects")
-            self.switch_count += 1
             socket = datapath.socket
             ip, _ = socket.getpeername()
 
             self.topology.update_switch(dpid, ip, event.ports)
             self.switch_manager.init_swc_vmids(dpid)
+
+            if self.topology.is_dhcp(dpid):
+                self.inception_dhcp.update_server(self.topology.dhcp_switch,
+                                                  self.topology.dhcp_port)
+
+            if not self.zk_manager.is_master():
+                # Slave controller work done
+                return
+
             switch_id = self.switch_manager.get_swc_id(self.dcenter_id, dpid)
             if switch_id is None:
                 switch_id = self.switch_manager.generate_swc_id(dpid)
@@ -140,45 +137,7 @@ class Inception(app_manager.RyuApp):
                 self.flow_manager.set_new_switch_flows(dpid, self.topology,
                                                        self.vmac_manager)
 
-            if self.topology.is_dhcp(dpid):
-                self.inception_dhcp.update_server(self.topology.dhcp_switch,
-                                                  self.topology.dhcp_port)
-
-            # do failover if all switches are connected
-            if (self.switch_count == CONF.num_switches and
-                    CONF.zookeeper_storage):
-                self._do_failover()
-
         # TODO(chen): A switch disconnects
-
-    def _do_failover(self):
-        """Check if any work is left by previous controller.
-        If so, continue the unfinished work.
-        """
-        pktin_logs, rpc_logs = self.zk_manager.get_failover_logs()
-        # Do unfinished packet_in handling
-        for pktin_log, raw_data in pktin_logs.items():
-            dpid, in_port = i_util.str_to_tuple(pktin_log)
-            pkt_data = raw_data.decode('Latin-1').encode('Latin-1')
-            packet = InceptionPacket(pkt_data)
-            self._process_packet_in(dpid, in_port, packet)
-            # Enqueue the log so that other controllers
-            # can dump the corresponding packet
-            self.queue_manager.enqueue(pkt_data)
-            # Delete log after task is finished
-            self.zk_manager.del_packetin_log(pktin_log)
-
-        # Do unfinished rpc
-        for rpc_log, rpc_data in rpc_logs.items():
-            func_name, _ = i_util.str_to_tuple(rpc_log)
-            rpc_tuple = i_util.str_to_tuple(rpc_data)
-            try:
-                txn = self.zk_manager.create_transaction()
-                rpc_method = getattr(self.inception_rpc, func_name)
-                rpc_method(txn, *rpc_tuple)
-                self.zk_manager.del_rpc_log(rpc_log, txn)
-            except AttributeError:
-                LOGGER.warning("Unexpected exception in finding rpc method")
 
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
@@ -188,33 +147,34 @@ class Inception(app_manager.RyuApp):
         dpid = dpid_to_str(datapath.id)
         in_port = str(msg.match['in_port'])
         packet = InceptionPacket(msg.data)
+        packet.serialize()
+        packet_data = packet.data.decode('Latin-1').encode('Latin-1')
+        pkt_digest = md5.new(packet_data).digest()
 
-        if self.master_ctl:
+        if self.zk_manager.is_master():
+            # master role
+            # First finish all unfinished packet_ins
+            self.zk_manager.process_pktin_cache()
             try:
                 # Logging in zookeeper
-                packet.serialize()
-                packet_data = packet.data.decode('Latin-1').encode('Latin-1')
                 pktin_log = i_util.tuple_to_str((dpid, in_port))
                 self.zk_manager.add_packetin_log(pktin_log, packet_data)
-
-                self._process_packet_in(dpid, in_port, packet)
-
-                # Enqueue the log so that other controllers
+                self.process_packet_in(dpid, in_port, packet)
+                # Enqueue packet so that other controllers
                 # can dump the corresponding packet
-                self.queue_manager.enqueue(packet_data)
+                self.zk_manager.enqueue(pkt_digest)
                 # Delete log after task is finished
                 self.zk_manager.del_packetin_log(pktin_log)
             except Exception:
                 LOGGER.warning("Unexpected exception in packet handler %s",
                                traceback.format_exc())
         else:
-            # TODO(chen): slave controller consumes handled packets
-            packet.serialize()
-            packet_data = packet.data
-            log_data = i_util.tuple_to_str((dpid, in_port, packet_data))
-            self.packet_queue.append(log_data)
+            # slave role
+            LOGGER.info('Cache packet_in message from (dpid=%s, in_port=%s)',
+                        dpid, in_port)
+            self.zk_manager.add_pktin(pkt_digest, dpid, in_port, packet)
 
-    def _process_packet_in(self, dpid, in_port, packet):
+    def process_packet_in(self, dpid, in_port, packet):
         """Process raw data received from dpid through in_port."""
         txn = self.zk_manager.create_transaction()
         # Process packet

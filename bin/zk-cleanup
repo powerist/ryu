@@ -69,6 +69,8 @@ def main():
     zk.delete('/arp', recursive=True)
     LOGGER.info('Clean up ZooKeeper (path=%s)', '/log')
     zk.delete('/log', recursive=True)
+    LOGGER.info('Clean up ZooKeeper (path=%s)', '/queue')
+    zk.delete('/queue', recursive=True)
     LOGGER.info('Clean up ZooKeeper (path=%s)', CONF.zk_election)
     zk.delete(CONF.zk_election, recursive=True)
 
