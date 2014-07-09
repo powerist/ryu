@@ -16,13 +16,14 @@
 #    under the License.
 
 """Inception utilities"""
-
+import logging
 import os
 import time
 import struct
+import md5
 from collections import defaultdict
 from collections import deque
-import logging
+
 from SimpleXMLRPCServer import SimpleXMLRPCServer
 from xmlrpclib import ServerProxy
 import socket
@@ -793,7 +794,6 @@ class RPCManager(object):
                                         allow_none=True)
         rpc_server.register_introspection_functions()
         rpc_server.register_instance(inception_rpc)
-        # server_thread = threading.Thread(target=rpc_server.serve_forever)
         hub.spawn(rpc_server.serve_forever)
 
         # Create RPC clients
@@ -852,33 +852,27 @@ class ArpManager(object):
         return (ip in self.ip_to_mac)
 
 
-class QueueManager(object):
-    """Manage queue for information sharing between controllers"""
-    def __init__(self):
-        # Initialization
-        pass
-
-    def enqueue(self, data):
-        pass
-
-    def dequeue(self):
-        return True
-
-
 class ZkManager(object):
     """Manage data storage and fetch in zookeeper"""
 
-    def __init__(self, zk_storage=False):
+    def __init__(self, inception, zk_storage=False):
         # zk_storage: Decide whether to use zookeeper (True) or not (False)
         self.zk_storage = zk_storage
+        self.inception = inception
         if self.zk_storage:
+            # Flag indicating master/slave role
+            self.master_ctl = False
+
             self.pos_path = "/pos"
             self.arp_path = "/arp"
+            self.queue_path = "/queue"
+            self.leader_path = "/election"
             self.pktin_path = "/log/packet_in"
             self.rpc_path = "/log/rpc"
 
             self.pktin_logs = {}
             self.rpc_logs = {}
+            self.digest_to_pktin = {}
 
             zk_logger = logging.getLogger('kazoo')
             zk_log_level = log.LOG_LEVELS[CONF.zk_log_level]
@@ -894,6 +888,65 @@ class ZkManager(object):
             self.zk.ensure_path(self.arp_path)
             self.zk.ensure_path(self.pktin_path)
             self.zk.ensure_path(self.rpc_path)
+
+            self.pkt_queue = self.zk.LockingQueue(self.queue_path)
+            self.thread_pkt = hub.spawn(self.handle_pkt_queue)
+            hub.spawn(self.run_for_leader)
+
+    def run_for_leader(self):
+        election = self.zk.Election(self.leader_path)
+        LOGGER.info('Contending for leadership...')
+        election.run(self.handle_role_upgrade)
+
+    def handle_role_upgrade(self):
+        LOGGER.info("Upgrade to master")
+        hub.kill(self.thread_pkt)
+        while self.pkt_queue.__len__() > 0:
+            self.consume_pkt()
+
+        dcenters = self.inception.rpc_manager.get_dcenters()
+        self.init_dcenter(dcenters)
+        self.load_data(arp_manager=self.inception.arp_manager,
+                       switch_manager=self.inception.switch_manager,
+                       vm_manager=self.inception.vm_manager,
+                       vmac_manager=self.inception.vmac_manager,
+                       tenant_manager=self.inception.tenant_manager)
+        self.load_failover_logs()
+        self.handle_failover_log()
+        self.master_ctl = True
+        # TODO: New leader election design
+        while True:
+            time.sleep(1)
+
+    def consume_pkt(self):
+        """Consume packet_in in queue and local cache"""
+        pkt_data = self.pkt_queue.get()
+        self.pkt_queue.consume()
+        pkt_digest = pkt_data.decode('Latin-1').encode('Latin-1')
+        self.digest_to_pktin.pop(pkt_digest, None)
+        LOGGER.info('Packet_in message consumed: %s', pkt_digest)
+
+    def handle_pkt_queue(self):
+        """For slave controller only. Consume whatever packets in the queue"""
+        while True:
+            if self.is_slave():
+                self.consume_pkt()
+
+    def queue_nonempty(self):
+        return (self.pkt_queue.__len__() > 0)
+
+    def enqueue(self, pkt_digest):
+        LOGGER.info('Packet_in message enqueued: %s', pkt_digest)
+        self.pkt_queue.put(pkt_digest)
+
+    def add_pktin(self, pkt_digest, dpid, in_port, pkt_data):
+        self.digest_to_pktin[pkt_digest] = (dpid, in_port, pkt_data)
+
+    def is_master(self):
+        return (self.master_ctl == True)
+
+    def is_slave(self):
+        return (self.master_ctl == False)
 
     def load_data(self, arp_manager, switch_manager, vm_manager, vmac_manager,
                   tenant_manager):
@@ -1053,6 +1106,7 @@ class ZkManager(object):
                 self.txn_commit(txn)
 
     def load_failover_logs(self):
+        LOGGER.info('Load failover logs...')
         # Get packet_in logs
         zk_pktins = self.zk.get_children(self.pktin_path)
         for znode_unicode in zk_pktins:
@@ -1069,8 +1123,52 @@ class ZkManager(object):
             data, _ = self.zk.get(log_path)
             self.rpc_logs[znode] = data
 
-    def get_failover_logs(self):
-        return (self.pktin_logs, self.rpc_logs)
+        LOGGER.info('Failover logs loaded')
+
+    def handle_failover_log(self):
+        """Check if any work is left by previous controller.
+        If so, continue the unfinished work.
+        """
+        LOGGER.info('Handle failover...')
+        # Do unfinished packet_in handling
+        for pktin_log, raw_data in self.pktin_logs.items():
+            dpid, in_port = str_to_tuple(pktin_log)
+            pkt_data = raw_data.decode('Latin-1').encode('Latin-1')
+            pkt_digest = md5.new(pkt_data).digest()
+            pkt_in = self.digest_to_pktin.pop(pkt_digest, None)
+            if pkt_in is not None:
+                packet = InceptionPacket(pkt_data)
+                self.inception.process_packet_in(dpid, in_port, packet)
+                # Enqueue the log so that other controllers
+                # can dump the corresponding packet
+                self.enqueue(pkt_digest)
+            # Delete log after task is finished
+            self.del_packetin_log(pktin_log)
+
+        # Do unfinished rpc
+        for rpc_log, rpc_data in self.rpc_logs.items():
+            func_name, _ = str_to_tuple(rpc_log)
+            rpc_tuple = str_to_tuple(rpc_data)
+            try:
+                txn = self.create_transaction()
+                rpc_method = getattr(self.inception.inception_rpc, func_name)
+                rpc_method(txn, *rpc_tuple)
+                self.del_rpc_log(rpc_log, txn)
+            except AttributeError:
+                LOGGER.warning("Unexpected exception in finding rpc method")
+        LOGGER.info('Failover done.')
+
+    def process_pktin_cache(self):
+        if self.digest_to_pktin:
+            LOGGER.info('Process pkt_in cache...')
+            for dpid, in_port, packet in self.digest_to_pktin.values():
+                packet_data = packet.data.decode('Latin-1').encode('Latin-1')
+                pktin_log = tuple_to_str((dpid, in_port))
+                self.add_packetin_log(pktin_log, packet_data)
+                self.inception.process_packet_in(dpid, in_port, packet)
+                self.del_packetin_log(pktin_log)
+            self.digest_to_pktin.clear()
+            LOGGER.info('pkt_in cache cleared.')
 
 
 class InceptionPacket(Packet):
