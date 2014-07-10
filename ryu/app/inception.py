@@ -32,7 +32,6 @@ from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import handler
 from ryu.controller import ofp_event
-from ryu.lib import hub
 from ryu.lib.dpid import dpid_to_str
 from ryu.lib.packet.arp import arp
 from ryu.lib.packet.dhcp import dhcp
@@ -142,6 +141,7 @@ class Inception(app_manager.RyuApp):
     @handler.set_ev_cls(ofp_event.EventOFPPacketIn, handler.MAIN_DISPATCHER)
     def packet_in_handler(self, event):
         """Handle when a packet is received."""
+        LOGGER.info('New packet_in received.')
         msg = event.msg
         datapath = msg.datapath
         dpid = dpid_to_str(datapath.id)
