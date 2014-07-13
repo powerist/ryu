@@ -39,9 +39,8 @@ CONF.register_cli_opts([
     cfg.StrOpt('log-config-file', default=None,
                help='Path to a logging config file to use'),
     cfg.StrOpt('log_formatter',
-               #default=('%(asctime)s - %(name)s - %(levelname)s - '
-               #         '%(threadName)s - %(message)s'),
-               default=('%(name)s - %(message)s'),
+               default=('%(asctime)s - %(name)s - %(levelname)s - '
+                        '%(threadName)s - %(message)s'),
                help='log formatter'),
 ])
 

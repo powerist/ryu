@@ -60,13 +60,15 @@ CONF.register_cli_opts([
 
 
 def main():
+    config_file = '/usr/local/etc/ryu/ryu.conf'
     try:
         CONF(project='ryu', version='ryu-manager %s' % version,
-             default_config_files=['/usr/local/etc/ryu/ryu.conf'])
+             default_config_files=[config_file])
     except cfg.ConfigFilesNotFoundError:
         CONF(project='ryu', version='ryu-manager %s' % version)
 
     log.init_log()
+    LOGGER.info('config_file=%s', config_file)
 
     app_lists = CONF.app_lists + CONF.app
     # keep old behaivor, run ofp if no application is specified.
