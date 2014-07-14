@@ -12,11 +12,11 @@ while : ; do
     rand_id=`shuf -i 0-$((${#vm_ip_list[@]}-1)) -n 1`
     target_host=${vm_ip_list[$rand_id]}
     if [ $target_host == $local_ip ]; then
-        echo "skip local ip"
+        #echo "skip local ip"
         continue;
     fi
-    arping -c 1 $target_host
+    arping -c 1 $target_host | xargs -L 1 -I '{}' date '+%s: {}'
     if [ $rand_id -lt 10 ]; then
-        arping -c 1 10.2.99.0 
+	arping -c 1 10.2.99.0 | xargs -L 1 -I '{}' date '+%s: {}'
     fi
 done

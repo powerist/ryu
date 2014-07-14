@@ -37,7 +37,7 @@ from ryu.lib.packet.arp import arp
 from ryu.lib.packet.dhcp import dhcp
 from ryu.lib.packet.ethernet import ethernet
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger('ryu.app.inception')
 
 CONF = cfg.CONF
 CONF.import_opt('zookeeper_storage', 'ryu.app.inception_conf')

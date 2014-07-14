@@ -37,6 +37,10 @@ for line in open('vm_ip.txt'):
         line_in  = line_in.replace('\x00', '') # remove possible \x00 non-sense chars
         if not line_in:
             break
+
+        (time_stamp, line_in)=line_in.split(':', 1) # get time stamp
+        line_in = line_in.strip()
+
         if line_in.startswith('ARPING '):
             line_out.append(line_in.replace('ARPING ', ''))
         elif line_in.startswith('Unicast '):
@@ -45,17 +49,17 @@ for line in open('vm_ip.txt'):
             pass
         elif line_in.startswith('Received 0 response'):
             line_out.append('X X X X X Timeout')
+            line_out.append(time_stamp)
             num_line_out += 1
             if num_line_out >= num_skips:
                 fout.write(','.join(line_out) + '\n')
             line_out = []
         elif line_in.startswith('Received 1 response'):
+            line_out.append(time_stamp)
             num_line_out += 1
             if num_line_out >= num_skips:
                 fout.write(','.join(line_out) + '\n')
             line_out = []
-        elif line_in == 'skip local ip':
-            pass
         else:
             raise RuntimeError('Unknown format of line=%s', line_in)
     fin.close()
